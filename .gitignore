@@ -12,10 +12,30 @@ dist
 dist-ssr
 *.local
 
+# 敏感配置（含 API key，永不入库）
+.env
+server/runtime-config.json
+
+# 运行时数据（含 base64 图片，体积巨大）
+server/series-data.json
+
+# 一键启动脚本产生的后台日志（start.sh 使用）
+.backend.log
+.frontend.log
+
+# 临时构建 / 调试产物（手动编译验证时产生，不应入仓）
+**/dist-check/
+**/tmp-build/
+**/tsconfig.check.json
+**/agent-smoke.ts
+**/probe*.ts
+**/probe*.cjs
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
 .idea
+.claude
 .DS_Store
 *.suo
 *.ntvs*
