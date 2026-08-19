@@ -23,13 +23,17 @@ export function dnaText(): string {
 /** 把 DNA 注入到 image 请求的 prompt 前面。 */
 export function withDnaImagePrompt(req: ImageRequest, opts: { includeCharacter?: boolean; includeScene?: boolean } = {}): ImageRequest {
   const prefix = buildImageSystemDirective(opts);
-  // 把 negative prompt 塞进 extraParams —— 当前 Agnes/OpenAI 兼容等都用 extraParams 透传。
-  const extraParams = { ...(req as any).extraParams || {}, ...(req as any).negativePrompt ? {} : { negative_prompt: IMAGE_NEGATIVE_PROMPT } };
+  // 把 negative prompt 塞进请求级 extraParams —— provider 会把它合并进最终请求体
+  // （config.extraParams 之后展开，请求级覆盖配置级）。
+  const extraParams: Record<string, unknown> = {
+    ...req.extraParams,
+    negative_prompt: IMAGE_NEGATIVE_PROMPT,
+  };
   return {
     ...req,
     prompt: `${prefix}\n\n---\n\n[Scene to render]\n${req.prompt}`,
-    extraParams: extraParams as any,
-  } as ImageRequest;
+    extraParams,
+  };
 }
 
 /** 把 DNA 注入到 text 请求的 system instruction。 */

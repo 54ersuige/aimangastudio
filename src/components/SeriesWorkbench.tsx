@@ -5,6 +5,7 @@ import {
   PlusIcon, RedoAltIcon, ChevronRightIcon, ChevronLeftIcon, ChevronDownIcon, ChevronUpIcon, DownloadIcon, EyeIcon,
 } from './icons';
 import { EmptyState, OnboardingArticles } from './EmptyState';
+import { exportSeriesAsStrips } from '../services/stripExport';
 
 /**
  * 重构后的主工作台：纵向"编辑稿"卡片流
@@ -65,16 +66,10 @@ export function SeriesWorkbench() {
 
   const handleExportAll = async () => {
     if (!currentSeries) return;
-    for (const { page } of allPages) {
-      const imgs = page.panels.filter(p => p.imageUrl);
-      for (const panel of imgs) {
-        if (!panel.imageUrl) continue;
-        const a = document.createElement('a');
-        a.href = panel.imageUrl;
-        a.download = `${currentSeries.title}-p${page.pageNumber}-${panel.index}.png`;
-        a.click();
-        await new Promise(r => setTimeout(r, 200));
-      }
+    const pages = allPages.map(x => x.page);
+    const n = await exportSeriesAsStrips(pages, currentSeries.title);
+    if (n === 0) {
+      alert('暂无可导出的分镜图');
     }
   };
 

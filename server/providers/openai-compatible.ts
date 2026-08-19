@@ -81,6 +81,8 @@ export async function generateImage(config: ModelConfig['image'], req: ImageRequ
     model: config.model,
     prompt: req.prompt,
     ...config.extraParams,
+    // 请求级参数（DNA 注入的 negative_prompt 等）覆盖配置级默认值
+    ...req.extraParams,
   };
 
   if (req.aspectRatio) {

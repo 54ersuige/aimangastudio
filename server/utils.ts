@@ -19,6 +19,12 @@ export interface ImageRequest {
   referenceImages?: { data: string; mimeType: string }[];
   aspectRatio?: string;
   size?: { width: number; height: number };
+  /**
+   * 请求级额外参数（如 negative_prompt）。
+   * Provider 构建请求体时应展开在 config.extraParams 之后（请求级覆盖配置级），
+   * 否则 DNA 注入的负面提示词等会静默丢失。
+   */
+  extraParams?: Record<string, unknown>;
 }
 
 export interface ImageResponse {

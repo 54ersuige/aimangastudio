@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useSeries } from '../contexts/SeriesContext';
 import { AgentEngine } from '../services/agentEngine';
+import { exportSeriesAsStrips } from '../services/stripExport';
 import { AgentChatPanel } from './AgentChatPanel';
 import { SeriesWorkbench } from './SeriesWorkbench';
 import type { ChatMessage, AgentStage } from '../types';
@@ -175,17 +176,9 @@ function AgentWorkbenchInner(props: {
         onExport={currentSeries && currentSeries.chapters.length > 0
           ? () => {
               const all = currentSeries.chapters.flatMap(c => c.pages);
-              for (const page of all) {
-                for (const panel of page.panels) {
-                  if (panel.imageUrl) {
-                    const a = document.createElement('a');
-                    a.href = panel.imageUrl;
-                    a.download = `${currentSeries.title}-p${page.pageNumber}-${panel.index}.png`;
-                    a.click();
-                  }
-                }
-              }
-              toast.push('已开始导出图片', 'success');
+              exportSeriesAsStrips(all, currentSeries.title)
+                .then(n => toast.push(n > 0 ? `已导出 ${n} 页条漫长图` : '暂无可导出的分镜图', n > 0 ? 'success' : 'error'))
+                .catch(e => toast.push(e.message || '导出失败', 'error'));
             }
           : undefined}
       />

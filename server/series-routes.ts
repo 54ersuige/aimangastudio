@@ -121,9 +121,9 @@ const WorldviewSchema = {
   properties: {
     summary: { type: 'string', description: '一句话世界观简介' },
     background: { type: 'string', description: '世界背景故事，2-3 段' },
-    era: { type: 'string', description: '时代设定，如"2077 年东京"' },
-    artStyle: { type: 'string', description: '美术风格关键词，如"赛博朋克 + 日式动漫"' },
-    paletteMood: { type: 'string', description: '色调氛围，如"冷蓝 + 霓虹紫"' },
+    era: { type: 'string', description: '时代设定，必须是现实当代或近代中国，如"2020 年代上海"' },
+    artStyle: { type: 'string', description: '美术风格关键词，必须在系统规范内细化：New Yorker 单幅插画 × Adrian Tomine 都市写实细线 × 独立 Graphic Novel，如"New Yorker 式细线写实 + 大量留白"' },
+    paletteMood: { type: 'string', description: '色调氛围，必须是暖色印刷感：如"奶油黄/燕麦底色 + 粉赭红棕点缀，低饱和"' },
   },
   required: ['summary', 'background', 'era', 'artStyle', 'paletteMood'],
 } as const;
@@ -132,7 +132,7 @@ router.post('/series/:id/worldview/generate', async (req, res) => {
   const series = getSeries(req.params.id);
   if (!series) return sendError(res, 404, 'Series not found');
   try {
-    const prompt = `用户想创作的漫画：\n标题：${series.title}\n一句话简介：${series.logline}\n风格：${series.style}\n\n请根据这些信息设计一个详细的世界观设定。`;
+    const prompt = `用户想创作的漫画：\n标题：${series.title}\n一句话简介：${series.logline}\n用户风格偏好（仅作题材/氛围参考，画风已由系统锁定）：${series.style}\n\n请根据这些信息设计一个详细的世界观设定。\n\n【画风硬约束】本系列画风已被系统 Art Direction 锁定为：New Yorker 单幅叙事 × Adrian Tomine 都市写实 × 欧美独立 Graphic Novel。你输出的 artStyle 与 paletteMood 必须在该范围内细化（细线写实、克制留白、暖色印刷感、低饱和），严禁出现日漫/二次元/赛博朋克/霓虹/高饱和/水彩/油画等词。era 必须是现实世界的当代或近代（不写科幻未来）。`;
     const worldview = await callStructuredJson<Worldview>(
       prompt,
       '你是一位资深漫画编辑，擅长世界设定。请输出严格的 JSON 格式。',
@@ -188,7 +188,7 @@ router.post('/series/:id/characters/generate', async (req, res) => {
     const generated: SeriesCharacter[] = [];
     for (const c of result.characters) {
       const imgReq: ImageRequest = withDnaImagePrompt({
-        prompt: `角色设定图：单人，${c.appearance}，${series.worldview.artStyle}风格，${series.worldview.paletteMood}色调。`,
+        prompt: `角色设定图：单人，${c.appearance}。画风与色调遵循前述系统规范；系列基调参考：${series.worldview.artStyle}，${series.worldview.paletteMood}（若与系统规范冲突，以系统规范为准）。`,
       });
       try {
         const img = await imageProvider.generateImage(config, imgReq);
@@ -229,7 +229,7 @@ router.post('/series/:id/characters', async (req, res) => {
       const style = series.worldview?.artStyle || series.style;
       const mood = series.worldview?.paletteMood || '';
       const img = await imageProvider.generateImage(config, withDnaImagePrompt({
-        prompt: `角色设定图：单人，${input.appearance}，${style}风格，${mood}色调。`,
+        prompt: `角色设定图：单人，${input.appearance}。画风与色调遵循前述系统规范；系列基调参考：${style}，${mood}（若与系统规范冲突，以系统规范为准）。`,
       }));
       referenceImage = img.image;
     } catch (e: any) {
@@ -284,7 +284,7 @@ router.post('/series/:id/characters/:characterId/regenerate-image', async (req, 
     const style = series.worldview?.artStyle || series.style;
     const mood = series.worldview?.paletteMood || '';
     const img = await imageProvider.generateImage(config, withDnaImagePrompt({
-      prompt: `角色设定图：单人，${character.appearance}，${style}风格，${mood}色调。`,
+      prompt: `角色设定图：单人，${character.appearance}。画风与色调遵循前述系统规范；系列基调参考：${style}，${mood}（若与系统规范冲突，以系统规范为准）。`,
     }));
     const updated = updateCharacter(series.id, character.id, { referenceImage: img.image });
     res.json({ character: updated });
@@ -448,7 +448,7 @@ router.post('/series/:id/pages/:pageId/generate', async (req, res) => {
       }
       const charText = charDescs.length > 0 ? `\n出场角色（参考图已提供）：\n${charDescs.join('\n')}` : '';
       const dialogueText = panel.dialogue ? `\n对白/旁白："${panel.dialogue}"` : '';
-      const prompt = `单格漫画图，${style}风格，${mood}色调。\n场景：${targetPage.sceneDescription}\n画面内容：${panel.description}${charText}${dialogueText}\n要求：单人单场景，画面聚焦于这一格的描述内容；如有人物，必须严格按参考图的脸部/服装/发型/年龄特征绘制；不要输出多格拼接图，不要输出页边距文字水印。`;
+      const prompt = `单幅画面（standalone illustration，禁止多格拼接）。画风与色调遵循前述系统规范；系列基调参考：${style}，${mood}（若与系统规范冲突，以系统规范为准）。\n场景：${targetPage.sceneDescription}\n画面内容：${panel.description}${charText}${dialogueText}\n要求：单人单场景，画面聚焦于这一格的描述内容；如有人物，必须严格按参考图的脸部/服装/发型/年龄特征绘制；不要输出多格拼接图，不要输出页边距文字水印。`;
       const img = await imageProvider.generateImage(config, withDnaImagePrompt({
         prompt,
         referenceImages: refImages.length > 0 ? refImages : undefined,
@@ -499,7 +499,7 @@ router.post('/series/:id/pages/:pageId/regenerate', async (req, res) => {
       }
       const charText = charDescs.length > 0 ? `\n出场角色（参考图已提供）：\n${charDescs.join('\n')}` : '';
       const dialogueText = panel.dialogue ? `\n对白/旁白："${panel.dialogue}"` : '';
-      const prompt = `单格漫画图（重新生成），${style}风格，${mood}色调。\n场景：${targetPage.sceneDescription}\n画面内容：${panel.description}${charText}${dialogueText}\n要求：单人单场景，画面聚焦于这一格；如有人物必须严格按参考图绘制；不要多格拼接图。`;
+      const prompt = `单幅画面（standalone illustration，禁止多格拼接，重新生成）。画风与色调遵循前述系统规范；系列基调参考：${style}，${mood}（若与系统规范冲突，以系统规范为准）。\n场景：${targetPage.sceneDescription}\n画面内容：${panel.description}${charText}${dialogueText}\n要求：单人单场景，画面聚焦于这一格；如有人物必须严格按参考图绘制；不要多格拼接图。`;
       const img = await imageProvider.generateImage(config, withDnaImagePrompt({
         prompt,
         referenceImages: refImages.length > 0 ? refImages : undefined,
@@ -601,7 +601,7 @@ router.post('/series/:id/pages/:pageId/rewrite', async (req, res) => {
       }
       const charText = charDescs.length > 0 ? `\n出场角色（参考图已提供）：\n${charDescs.join('\n')}` : '';
       const dialogueText = panel.dialogue ? `\n对白/旁白："${panel.dialogue}"` : '';
-      const prompt = `单格漫画图，${style}风格，${mood}色调。\n场景：${rewritten.sceneDescription}\n画面内容：${panel.description}${charText}${dialogueText}\n要求：单人单场景；如有人物必须严格按参考图的脸部/服装/发型绘制；不要多格拼接。`;
+      const prompt = `单幅画面（standalone illustration，禁止多格拼接）。画风与色调遵循前述系统规范；系列基调参考：${style}，${mood}（若与系统规范冲突，以系统规范为准）。\n场景：${rewritten.sceneDescription}\n画面内容：${panel.description}${charText}${dialogueText}\n要求：单人单场景；如有人物必须严格按参考图的脸部/服装/发型绘制；不要多格拼接。`;
       const img = await imageProvider.generateImage(config, withDnaImagePrompt({
         prompt,
         referenceImages: refImages.length > 0 ? refImages : undefined,
@@ -676,7 +676,7 @@ router.post('/series/:id/pages/:pageId/panels/:panelIndex/rewrite', async (req, 
     }
     const charText = charDescs.length > 0 ? `\n出场角色（参考图已提供）：\n${charDescs.join('\n')}` : '';
     const dialogueText = rewritten.dialogue ? `\n对白/旁白："${rewritten.dialogue}"` : '';
-    const prompt = `单格漫画图，${style}风格，${mood}色调。\n场景：${targetPage.sceneDescription}\n画面内容：${rewritten.description}${charText}${dialogueText}\n要求：单人单场景；如有人物必须严格按参考图的脸部/服装/发型绘制；不要多格拼接。`;
+    const prompt = `单幅画面（standalone illustration，禁止多格拼接）。画风与色调遵循前述系统规范；系列基调参考：${style}，${mood}（若与系统规范冲突，以系统规范为准）。\n场景：${targetPage.sceneDescription}\n画面内容：${rewritten.description}${charText}${dialogueText}\n要求：单人单场景；如有人物必须严格按参考图的脸部/服装/发型绘制；不要多格拼接。`;
     const img = await imageProvider.generateImage(config, withDnaImagePrompt({
       prompt,
       referenceImages: refImages.length > 0 ? refImages : undefined,
