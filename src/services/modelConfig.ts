@@ -25,19 +25,19 @@ export interface ModelConfig {
 }
 
 export const DEFAULT_TEXT_CONFIG: TextModelConfig = {
-  provider: 'deepseek',
-  model: 'deepseek-v4-flash',
+  provider: 'agnes',
+  model: 'agnes-2.5-flash',
   apiKey: '',
-  baseUrl: 'https://api.deepseek.com',
+  baseUrl: 'https://apihub.agnes-ai.cn/v1',
   timeout: 60000,
   extraParams: {},
 };
 
 export const DEFAULT_IMAGE_CONFIG: ImageModelConfig = {
-  provider: 'minimax',
-  model: 'image-01-live',
+  provider: 'agnes',
+  model: 'agnes-image-2.1-flash',
   apiKey: '',
-  baseUrl: 'https://api.minimaxi.chat/v1',
+  baseUrl: 'https://apihub.agnes-ai.cn/v1',
   timeout: 120000,
   extraParams: {},
 };

@@ -20,8 +20,6 @@ import { CogIcon } from './icons';
 export function AgentWorkbench(props: {
   language?: Language;
   setLanguage?: (lang: Language) => void;
-  onOpenApiKeyModal?: () => void;
-  hasApiKey?: boolean;
   onOpenModelConfig?: () => void;
 }): React.ReactElement {
   return (
@@ -34,8 +32,6 @@ export function AgentWorkbench(props: {
 function AgentWorkbenchInner(props: {
   language?: Language;
   setLanguage?: (lang: Language) => void;
-  onOpenApiKeyModal?: () => void;
-  hasApiKey?: boolean;
   onOpenModelConfig?: () => void;
 }): React.ReactElement {
   const ctx = useSeries();

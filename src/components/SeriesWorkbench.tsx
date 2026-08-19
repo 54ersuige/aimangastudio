@@ -549,7 +549,7 @@ function ChaptersCard({
   series: Series;
   targetPages: number;
   setTargetPages: (n: number) => void;
-  onGenerate: (target: number) => Promise<void>;
+  onGenerate: (target: number) => Promise<Chapter[] | null>;
   onPickPage: (id: string) => void;
   busy: boolean;
 }) {
@@ -654,9 +654,9 @@ function PageCard(props: {
   currentIndex: number;
   onPrev: () => void;
   onNext: () => void;
-  onBreakdown: () => Promise<void>;
-  onGenerate: () => Promise<void>;
-  onRegenerate: () => Promise<void>;
+  onBreakdown: () => Promise<SeriesPage | null>;
+  onGenerate: () => Promise<SeriesPage | null>;
+  onRegenerate: () => Promise<SeriesPage | null>;
   onRewritePage: () => Promise<void>;
   pageInstruction: string;
   setPageInstruction: (v: string) => void;
@@ -665,7 +665,7 @@ function PageCard(props: {
   setPanelInstrOpen: (v: number | null) => void;
   panelInstruction: string;
   setPanelInstruction: (v: string) => void;
-  onContinue: () => Promise<void>;
+  onContinue: () => Promise<SeriesPage | null>;
   busy: boolean;
 }) {
   const { page, allPages, currentIndex, onPrev, onNext, onBreakdown, onGenerate, onRegenerate, onRewritePage, pageInstruction, setPageInstruction, onRewritePanel, panelInstrOpen, setPanelInstrOpen, panelInstruction, setPanelInstruction, onContinue, busy } = props;

@@ -34,7 +34,7 @@
 
 `regen-dna-reference.cjs` —— 重新生成 references/ 下的 3 张参考图。
 
-需要 Agnes API key（已硬编码）。如果 Agnes 升级或换 provider，需要改里面的 endpoint。
+需要设置环境变量 `AGNES_API_KEY`（不会入库）。如果 Agnes 升级或换 provider，需要改里面的 endpoint。
 
 ---
 

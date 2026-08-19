@@ -5,7 +5,12 @@
  */
 const fs = require('fs');
 const path = require('path');
-const API_KEY = process.env.IMAGE_API_KEY || '';
+// API key 从环境变量读取：set AGNES_API_KEY=sk-xxx && node tools/regen-dna-reference.cjs
+const API_KEY = process.env.AGNES_API_KEY;
+if (!API_KEY) {
+  console.error('Missing AGNES_API_KEY environment variable. Example: AGNES_API_KEY=sk-xxx node tools/regen-dna-reference.cjs');
+  process.exit(1);
+}
 const BASE_URL = 'https://apihub.agnes-ai.cn/v1';
 
 const IMAGE_SYSTEM_PROMPT = `

@@ -113,13 +113,10 @@ function New-DesktopShortcut {
     $iconLoc = 'shell32.dll,13'
     $stopIcon = 'shell32.dll,27'   # different icon for the stop action
 
-    # ---- Build a start.bat wrapper that calls --silent for true background launch
-    $silentLauncher = Join-Path $ScriptDir 'start-silent.bat'
-    @"
-@echo off
-:: Wrapper for silent launch (no black console window)
-powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%SCRIPT_DIR%start.ps1" --silent
-"@ -replace '%SCRIPT_DIR%', ($ScriptDir -replace '\\','\\') | Set-Content -LiteralPath $silentLauncher -Encoding ASCII
+    # Shortcuts launch start.ps1 --silent directly via powershell.exe,
+    # so no extra wrapper file (start-silent.bat) is needed.
+    $silentTarget  = 'powershell.exe'
+    $silentArgs    = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + (Join-Path $ScriptDir 'start.ps1') + '" --silent'
 
     $results = @()
 
@@ -129,7 +126,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%SC
         $lnkPath = Join-Path $desktop 'AIMangaStudio.lnk'
         if (Test-Path -LiteralPath $lnkPath) { Remove-Item -LiteralPath $lnkPath -Force }
         $sc = $ws.CreateShortcut($lnkPath)
-        $sc.TargetPath       = $silentLauncher
+        $sc.TargetPath       = $silentTarget
+        $sc.Arguments        = $silentArgs
         $sc.WorkingDirectory = $ScriptDir
         $sc.WindowStyle      = 7
         $sc.IconLocation     = $iconLoc
@@ -164,7 +162,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%SC
             $lnkPath2 = Join-Path $startMenu 'AIMangaStudio.lnk'
             if (Test-Path -LiteralPath $lnkPath2) { Remove-Item -LiteralPath $lnkPath2 -Force }
             $sc2 = $ws.CreateShortcut($lnkPath2)
-            $sc2.TargetPath       = $silentLauncher
+            $sc2.TargetPath       = $silentTarget
+            $sc2.Arguments        = $silentArgs
             $sc2.WorkingDirectory = $ScriptDir
             $sc2.WindowStyle      = 7
             $sc2.IconLocation     = $iconLoc
