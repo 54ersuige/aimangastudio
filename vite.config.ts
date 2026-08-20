@@ -16,6 +16,12 @@ export default defineConfig(({ mode }) => {
             changeOrigin: true,
             secure: false,
           },
+          // 生成图片的静态目录（后端 series-store 落盘，JSON 只存路径）
+          '/data': {
+            target: `http://localhost:${serverPort}`,
+            changeOrigin: true,
+            secure: false,
+          },
         },
       },
     };

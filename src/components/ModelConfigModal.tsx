@@ -1,11 +1,19 @@
 import React, { useState, useEffect } from 'react';
 import { useLocalization } from '../hooks/useLocalization';
-import type { ModelConfig, TextProvider, ImageProvider } from '../services/modelConfig';
+import type {
+  ModelConfig,
+  TextProvider,
+  ImageProvider,
+  DnaKey,
+  DnaMeta,
+} from '../services/modelConfig';
+import { DEFAULT_DNA_KEY } from '../services/modelConfig';
 
 interface ModelConfigModalProps {
   isOpen: boolean;
   onClose: () => void;
   config: ModelConfig;
+  dnaList?: DnaMeta[];
   onChange: (config: ModelConfig) => void;
   onSave: () => void;
   isLoading: boolean;
@@ -47,13 +55,14 @@ export function ModelConfigModal({
   isOpen,
   onClose,
   config,
+  dnaList = [],
   onChange,
   onSave,
   isLoading,
   error,
 }: ModelConfigModalProps): React.ReactElement | null {
   const { t } = useLocalization();
-  const [activeTab, setActiveTab] = useState<'text' | 'image'>('text');
+  const [activeTab, setActiveTab] = useState<'text' | 'image' | 'dna'>('text');
   const [localConfig, setLocalConfig] = useState<ModelConfig>(config);
 
   useEffect(() => {
@@ -70,6 +79,12 @@ export function ModelConfigModal({
 
   const updateImage = (updates: Partial<ModelConfig['image']>) => {
     const next = { ...localConfig, image: { ...localConfig.image, ...updates } };
+    setLocalConfig(next);
+    onChange(next);
+  };
+
+  const updateDna = (dnaKey: DnaKey) => {
+    const next = { ...localConfig, dnaKey };
     setLocalConfig(next);
     onChange(next);
   };
@@ -122,6 +137,17 @@ export function ModelConfigModal({
             }`}
           >
             {t('imageModelTab')}
+          </button>
+          <button
+            onClick={() => setActiveTab('dna')}
+            className={`flex-1 py-3 text-sm font-medium ${
+              activeTab === 'dna'
+                ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50'
+                : 'text-gray-600 hover:bg-gray-50'
+            }`}
+            data-testid="dna-tab"
+          >
+            视觉风格
           </button>
         </div>
 
@@ -277,6 +303,60 @@ export function ModelConfigModal({
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono text-xs"
                 />
               </div>
+            </div>
+          )}
+
+          {activeTab === 'dna' && (
+            <div className="space-y-4" data-testid="dna-panel">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900 mb-1">默认视觉风格 DNA</h3>
+                <p className="text-xs text-gray-600 mb-4">
+                  选择一个 DNA 预设。系统会把它注入到所有出图/出文请求中，确保视觉一致性。
+                  已创建的系列 DNA 在创建时锁定，<strong>此处修改只影响此后新建的系列</strong>。
+                </p>
+              </div>
+              <div className="space-y-3">
+                {dnaList.map((dna) => {
+                  const selected = (localConfig.dnaKey || DEFAULT_DNA_KEY) === dna.key;
+                  return (
+                    <label
+                      key={dna.key}
+                      className={`block border rounded-lg p-4 transition cursor-pointer ${
+                        selected
+                          ? 'border-indigo-500 bg-indigo-50 ring-1 ring-indigo-500'
+                          : 'border-gray-200 hover:border-gray-300 bg-white'
+                      }`}
+                      data-testid={`dna-option-${dna.key}`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <input
+                          type="radio"
+                          name="dnaKey"
+                          value={dna.key}
+                          checked={selected}
+                          onChange={() => updateDna(dna.key)}
+                          className="mt-1 h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500"
+                        />
+                        <div className="flex-1">
+                          <div className="flex items-baseline gap-2">
+                            <span className="font-semibold text-gray-900">{dna.name}</span>
+                            <span className="text-xs text-gray-500 font-mono">{dna.key}</span>
+                          </div>
+                          <p className="text-sm text-gray-700 mt-1">{dna.tagline}</p>
+                          {dna.genres.length > 0 && (
+                            <p className="text-xs text-gray-500 mt-2">
+                              适合题材：{dna.genres.join(' · ')}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+              {dnaList.length === 0 && (
+                <p className="text-xs text-gray-500">正在从服务器加载 DNA 列表…</p>
+              )}
             </div>
           )}
         </div>

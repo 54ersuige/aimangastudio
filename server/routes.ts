@@ -8,8 +8,9 @@ import * as step from './providers/step.js';
 import * as minimax from './providers/minimax.js';
 import * as openaiCompatible from './providers/openai-compatible.js';
 import type { ImageRequest, TextRequest } from './utils.js';
-import { sendError } from './utils.js';
-import { withDnaImagePrompt, withDnaTextPrompt } from './dna-inject.js';
+import { sendError, logGeneration } from './utils.js';
+import { withDnaImagePrompt, withDnaTextPrompt, resolveDnaKey } from './dna-inject.js';
+import { listDna, DNA_KEYS } from './dna/registry.js';
 
 const router = Router();
 
@@ -52,7 +53,16 @@ router.get('/config', (_req, res) => {
   res.json({
     text: { ...config.text, apiKey: maskKey(config.text.apiKey) },
     image: { ...config.image, apiKey: maskKey(config.image.apiKey) },
+    dnaKey: config.dnaKey,
   });
+});
+
+/**
+ * 返回所有可用的 DNA 预设清单（前端 ModelConfigModal 用）。
+ * 只暴露元数据，不暴露 prompt 正文（避免 prompt 被前端修改）。
+ */
+router.get('/dna', (_req, res) => {
+  res.json({ list: listDna() });
 });
 
 function maskKey(key?: string): string | undefined {
@@ -78,6 +88,10 @@ const UpdateConfigSchema = z.object({
     timeout: z.number().int().min(1000),
     extraParams: z.record(z.any()),
   }).optional(),
+  /**
+   * 默认 DNA key。改这里只影响「此后新建」的系列；已存在系列的 dnaKey 已冻结（防风格漂移）。
+   */
+  dnaKey: z.enum(DNA_KEYS as unknown as [string, ...string[]]).optional(),
 });
 
 router.post('/config', (req, res) => {
@@ -87,9 +101,15 @@ router.post('/config', (req, res) => {
   }
 
   const current = getConfig();
+  // 校验 DNA key 合法性 —— enum 已放宽为 [string, ...string[]] 以跟随 DNA_KEYS 单一事实来源，
+  // 但写入 ModelConfig 时仍需收窄到注册表允许的字面量。
+  const nextDnaKey: ModelConfig['dnaKey'] = (parsed.data.dnaKey && (DNA_KEYS as readonly string[]).includes(parsed.data.dnaKey))
+    ? (parsed.data.dnaKey as ModelConfig['dnaKey'])
+    : current.dnaKey;
   const next: ModelConfig = {
     text: { ...current.text, ...(parsed.data.text || {}) },
     image: { ...current.image, ...(parsed.data.image || {}) },
+    dnaKey: nextDnaKey,
   };
 
   // When the frontend sends a masked key, preserve the original unless it changed.
@@ -112,6 +132,14 @@ const TextRequestSchema = z.object({
   temperature: z.number().optional(),
   maxTokens: z.number().int().optional(),
   referenceImages: z.array(z.object({ data: z.string(), mimeType: z.string() })).optional(),
+  // P2-11：仅创作类调用注入 DNA（约 8KB 的画风宪法 + 叙事规则）。
+  // 默认 false —— 闲聊/问答不再无差别背负全套指令。
+  withDna: z.boolean().optional(),
+  /**
+   * 指定 DNA key。优先级 withDna=true 时才生效；未指定时使用 config.dnaKey。
+   * 通用接口（非系列路由）允许覆盖默认 DNA，但 series 业务路由总是用 series.dnaKey。
+   */
+  dnaKey: z.enum(DNA_KEYS as unknown as [string, ...string[]]).optional(),
 });
 
 router.post('/text', async (req, res) => {
@@ -121,9 +149,13 @@ router.post('/text', async (req, res) => {
   }
 
   try {
-    const config = getConfig().text;
+    const cfg = getConfig();
+    const config = cfg.text;
     const provider = getTextProvider(config);
-    const textReq = withDnaTextPrompt(parsed.data as TextRequest);
+    const { withDna, dnaKey: reqDnaKey, ...rest } = parsed.data;
+    const textReq = withDna
+      ? withDnaTextPrompt(rest as TextRequest, { dnaKey: resolveDnaKey(reqDnaKey ?? cfg.dnaKey) })
+      : (rest as TextRequest);
     const result = await provider.generateText(config, textReq);
     res.json(result);
   } catch (e: any) {
@@ -137,6 +169,11 @@ const ImageRequestSchema = z.object({
   referenceImages: z.array(z.object({ data: z.string(), mimeType: z.string() })).optional(),
   aspectRatio: z.string().optional(),
   size: z.object({ width: z.number(), height: z.number() }).optional(),
+  /**
+   * 指定 DNA key。默认使用 config.dnaKey。
+   * 通用出图接口（playground / 调试）允许选 DNA，但 series 业务路由总是用 series.dnaKey。
+   */
+  dnaKey: z.enum(DNA_KEYS as unknown as [string, ...string[]]).optional(),
 });
 
 router.post('/image', async (req, res) => {
@@ -146,9 +183,13 @@ router.post('/image', async (req, res) => {
   }
 
   try {
-    const config = getConfig().image;
+    const cfg = getConfig();
+    const config = cfg.image;
     const provider = getImageProvider(config);
-    const imageReq = withDnaImagePrompt(parsed.data as ImageRequest);
+    const { dnaKey: reqDnaKey, ...rest } = parsed.data;
+    const effectiveKey = resolveDnaKey(reqDnaKey ?? cfg.dnaKey);
+    const imageReq = withDnaImagePrompt(rest as ImageRequest, { dnaKey: effectiveKey });
+    logGeneration('playground-image', { model: config.model, prompt: imageReq.prompt, dnaKey: effectiveKey });
     const result = await provider.generateImage(config, imageReq);
     res.json(result);
   } catch (e: any) {

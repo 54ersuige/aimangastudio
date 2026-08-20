@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useSeries } from '../contexts/SeriesContext';
 import type { SeriesPage, SeriesCharacter, Chapter, Series } from '../types';
 import {
@@ -6,6 +6,8 @@ import {
 } from './icons';
 import { EmptyState, OnboardingArticles } from './EmptyState';
 import { exportSeriesAsStrips } from '../services/stripExport';
+import { fetchDnaList } from '../services/modelClient';
+import { DEFAULT_DNA_KEY, type DnaKey, type DnaMeta } from '../services/modelConfig';
 
 /**
  * 重构后的主工作台：纵向"编辑稿"卡片流
@@ -31,7 +33,8 @@ export function SeriesWorkbench() {
 
   const [loglineTitle, setLoglineTitle] = useState('');
   const [loglineDesc, setLoglineDesc] = useState('');
-  const [loglineStyle, setLoglineStyle] = useState('');
+  const [loglineDnaKey, setLoglineDnaKey] = useState<DnaKey>(DEFAULT_DNA_KEY);
+  const [dnaList, setDnaList] = useState<DnaMeta[]>([]);
   const [targetPages, setTargetPages] = useState(12);
   const [pageInstruction, setPageInstruction] = useState('');
   const [panelInstrOpen, setPanelInstrOpen] = useState<number | null>(null);
@@ -60,9 +63,20 @@ export function SeriesWorkbench() {
 
   const handleCreate = async () => {
     if (!loglineTitle.trim() || !loglineDesc.trim()) return;
-    await createSeries({ title: loglineTitle, logline: loglineDesc, style: loglineStyle || undefined });
-    setLoglineTitle(''); setLoglineDesc(''); setLoglineStyle('');
+    await createSeries({ title: loglineTitle, logline: loglineDesc, dnaKey: loglineDnaKey });
+    setLoglineTitle(''); setLoglineDesc('');
   };
+
+  // 加载系统预置 DNA 列表（创建系列时锁定一套，创建后不可改）
+  useEffect(() => {
+    fetchDnaList().then(r => {
+      setDnaList(r.list);
+      if (r.list.length > 0 && !r.list.find(d => d.key === loglineDnaKey)) {
+        setLoglineDnaKey(r.list[0].key);
+      }
+    }).catch(() => { /* 后端未启动时静默回退到默认 */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleExportAll = async () => {
     if (!currentSeries) return;
@@ -149,13 +163,41 @@ export function SeriesWorkbench() {
                 />
               </div>
               <div>
-                <label className="field-label">画风偏好（可选）</label>
-                <input
-                  className="field-input"
-                  value={loglineStyle}
-                  onChange={e => setLoglineStyle(e.target.value)}
-                  placeholder="例如：日式动漫 / 韩漫平涂 / 写实水彩（不填则由 AI 决定）"
-                />
+                <label className="field-label">画风 DNA（创建后不可更改）</label>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(12rem, 1fr))', gap: '0.625rem' }}>
+                  {dnaList.length === 0 ? (
+                    <div style={{ fontSize: '0.875rem', color: 'var(--ink-2)' }}>默认：纽约客·城市叙事（后端不可用时）</div>
+                  ) : (
+                    dnaList.map(d => {
+                      const selected = d.key === loglineDnaKey;
+                      return (
+                        <button
+                          key={d.key}
+                          type="button"
+                          onClick={() => setLoglineDnaKey(d.key)}
+                          className="btn"
+                          style={{
+                            textAlign: 'left',
+                            padding: '0.75rem 0.875rem',
+                            borderRadius: '0.5rem',
+                            border: selected ? '2px solid var(--ink-2, #2a2622)' : '1px solid var(--rule)',
+                            background: selected ? 'var(--paper-3, #f0e9d8)' : 'var(--paper, #fbf7ec)',
+                            boxShadow: selected ? '0 1px 0 var(--ink-2, #2a2622)' : 'none',
+                            display: 'flex', flexDirection: 'column', gap: '0.25rem',
+                            whiteSpace: 'normal', alignItems: 'stretch', minWidth: 0,
+                            transition: 'all 120ms ease',
+                      }}
+                        >
+                          <span style={{ fontWeight: 600, fontSize: '0.9375rem' }}>{d.name}</span>
+                          <span style={{ fontSize: '0.8125rem', color: 'var(--ink-2)', lineHeight: 1.4 }}>{d.tagline}</span>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+                <p style={{ fontSize: '0.8125rem', color: 'var(--ink-2)', marginTop: '0.5rem', marginBottom: 0 }}>
+                  画风由系统 Art Direction 锁定为所选 DNA；简介中的题材/氛围提示会作为世界观参考。
+                </p>
               </div>
               <button
                 onClick={handleCreate}
@@ -407,7 +449,9 @@ function CardSection({
  * 各卡片内容
  * ============================================================ */
 
-function LoglineCard({ series }: { series: Series }) {
+function LoglineCard({ series, dnaList = [] }: { series: Series; dnaList?: DnaMeta[] }) {
+  // series.dnaKey 在创建时被冻结；找不到 metadata 时回退到 key 字符串，避免「未加载 DNA 元数据」时显示空白。
+  const dnaMeta = dnaList.find(d => d.key === series.dnaKey);
   return (
     <div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
@@ -416,12 +460,19 @@ function LoglineCard({ series }: { series: Series }) {
           <p style={{ fontSize: '1rem', lineHeight: 1.6, color: 'var(--ink)', marginTop: '0.5rem' }}>{series.logline}</p>
         </div>
         <div>
-          <div className="kicker">画风</div>
-          <p style={{ fontSize: '0.9375rem', color: 'var(--ink-2)', marginTop: '0.5rem' }}>{series.style || '由 AI 决定'}</p>
+          <div className="kicker">画风 DNA（创建后不可更改）</div>
+          {dnaMeta ? (
+            <>
+              <p style={{ fontSize: '0.9375rem', fontWeight: 600, color: 'var(--ink)', marginTop: '0.5rem' }}>{dnaMeta.name}</p>
+              <p style={{ fontSize: '0.8125rem', color: 'var(--ink-2)', lineHeight: 1.4, marginTop: '0.25rem' }}>{dnaMeta.tagline}</p>
+            </>
+          ) : (
+            <p style={{ fontSize: '0.9375rem', color: 'var(--ink-2)', marginTop: '0.5rem' }}>{series.dnaKey || '（加载中…）'}</p>
+          )}
         </div>
       </div>
       <hr className="rule-soft" />
-      <div className="kicker">这些信息是后续每一步 AI 生成的依据，可在聊天中修改。</div>
+      <div className="kicker">这些信息是后续每一步 AI 生成的依据，可在聊天中修改（画风除外）。</div>
     </div>
   );
 }

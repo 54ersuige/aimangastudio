@@ -69,15 +69,16 @@ function detectIntent(text: string): {
   return { intent: text.trim(), isFreeform: true };
 }
 
-/** "删除 X" / "改成 X" 的轻量语义。 */
-function detectMutation(text: string): { action: 'delete' | 'rename' | 'change_style'; target?: string; value?: string } | null {
+/** "删除 X" / "改成 X" 的轻量语义。
+ * 注意：画风 (style) 已从 Series 整体移除，改为创建时锁定的 DNA —— 不可在运行时变更。
+ * 因此不再支持"画风改 X"指令；用户若需要换画风，需要新建一个系列。
+ */
+function detectMutation(text: string): { action: 'delete' | 'rename'; target?: string; value?: string } | null {
   const t = text.trim();
   const m = t.match(/^删除\s*(.+)$/);
   if (m) return { action: 'delete', target: m[1].trim() };
   const r = t.match(/^(?:把|将)\s*(.+?)\s*(?:改名|改名为|叫做)\s*(.+)$/);
   if (r) return { action: 'rename', target: r[1].trim(), value: r[2].trim() };
-  const s = t.match(/^画风?\s*(?:改|换)\s*(?:成|为)?\s*(.+)$/);
-  if (s) return { action: 'change_style', value: s[1].trim() };
   return null;
 }
 
@@ -95,10 +96,10 @@ export class AgentEngine {
 
   // 引擎所需的 SeriesContext 子集（由 React 层注入，全部为 getter 形式以避免闭包陷阱）。
   private getSeries: () => Series | null;
-  private ensureSeries: (input: { title: string; logline: string; style?: string }) => Promise<Series>;
-  private patchSeries: (patch: Partial<Pick<Series, 'title' | 'style' | 'logline'>>) => Promise<Series | null>;
-  private genWorldview: () => Promise<Worldview | null>;
-  private genCharacters: () => Promise<SeriesCharacter[] | null>;
+  private ensureSeries: (input: { title: string; logline: string }) => Promise<Series>;
+  private patchSeries: (patch: Partial<Pick<Series, 'title' | 'logline'>>) => Promise<Series | null>;
+  private genWorldview: (hint?: string) => Promise<Worldview | null>;
+  private genCharacters: (hint?: string) => Promise<SeriesCharacter[] | null>;
   private genChapters: (target?: number) => Promise<Chapter[] | null>;
   private breakdownPage: (pageId: string) => Promise<SeriesPage | null>;
   private generatePage: (pageId: string) => Promise<SeriesPage | null>;
@@ -112,10 +113,10 @@ export class AgentEngine {
   /** 一组 dep 函数。React 层每次重渲染都重新构造 deps 并调用此方法。 */
   setDeps(deps: {
     getSeries: () => Series | null;
-    ensureSeries: (input: { title: string; logline: string; style?: string }) => Promise<Series>;
-    patchSeries: (patch: Partial<Pick<Series, 'title' | 'style' | 'logline'>>) => Promise<Series | null>;
-    genWorldview: () => Promise<Worldview | null>;
-    genCharacters: () => Promise<SeriesCharacter[] | null>;
+    ensureSeries: (input: { title: string; logline: string }) => Promise<Series>;
+    patchSeries: (patch: Partial<Pick<Series, 'title' | 'logline'>>) => Promise<Series | null>;
+    genWorldview: (hint?: string) => Promise<Worldview | null>;
+    genCharacters: (hint?: string) => Promise<SeriesCharacter[] | null>;
     genChapters: (target?: number) => Promise<Chapter[] | null>;
     breakdownPage: (pageId: string) => Promise<SeriesPage | null>;
     generatePage: (pageId: string) => Promise<SeriesPage | null>;
@@ -175,20 +176,20 @@ export class AgentEngine {
       return;
     }
     // 已有系列 —— 根据当前进度选择开场白。
+    // P0-2：不再自动触发生成（快速切换系列会产生飞行中的并发生成任务，
+    // 与用户主动操作交错导致数据竞态）。改为发确认消息，用户点头才开始。
     if (!s.worldview) {
       this.stage = 'reviewing_worldview';
       this.messages = [
-        agentMsg(`欢迎回到 **${s.title}**。先让我把世界观跑出来，你确认后再走下一步。`),
+        agentMsg(`欢迎回到 **${s.title}**。这个系列还没有世界观设定 —— 回复「**开始**」我就生成，或者直接说出你的想法（我会当作修改意见）。`),
       ];
       this.emit();
-      void this.runGenerateWorldview();
     } else if (s.characters.length === 0) {
       this.stage = 'reviewing_characters';
       this.messages = [
-        agentMsg(`世界观已确认。现在我开始生成核心角色（主角 + 反派 + 配角）。请稍等。`),
+        agentMsg(`欢迎回到 **${s.title}**。世界观已就绪，还差角色设定 —— 回复「**开始**」我就生成核心角色（主角 + 配角 + 反派），也可以先说说你的要求。`),
       ];
       this.emit();
-      void this.runGenerateCharacters();
     } else if (s.chapters.length === 0) {
       this.stage = 'reviewing_chapters';
       this.messages = [
@@ -248,7 +249,12 @@ export class AgentEngine {
           await this.runGenerateWorldview();
           return;
         }
-        // 自由文本：当作"修改意见"，让 AI 重新生成并应用
+        // 还没有世界观时，「开始/生成」= 首次生成
+        if (!this.getSeries()?.worldview && /^(开始|开始生成|生成|go|start)$/i.test(trimmed)) {
+          await this.runGenerateWorldview();
+          return;
+        }
+        // 自由文本：当作"修改意见"，让 AI 重新生成并应用（hint 会进入后端 prompt）
         await this.regenerateWorldviewWithHint(trimmed);
         return;
       }
@@ -259,6 +265,11 @@ export class AgentEngine {
           return;
         }
         if (intent.regenerate) {
+          await this.runGenerateCharacters();
+          return;
+        }
+        // 还没有角色时，「开始/生成」= 首次生成
+        if ((this.getSeries()?.characters.length ?? 0) === 0 && /^(开始|开始生成|生成|go|start)$/i.test(trimmed)) {
           await this.runGenerateCharacters();
           return;
         }
@@ -304,21 +315,21 @@ export class AgentEngine {
   // ── 各阶段实现 ──
 
   private async handleLoglinePhase(text: string): Promise<void> {
-    // 解析一句话里的标题 / 简介 / 画风
-    const { title, logline, style } = parseLogline(text);
+    // 解析一句话里的标题 / 简介（画风已统一由创建系列时的 DNA 预设锁定，不再从聊天中接受）
+    const { title, logline } = parseLogline(text);
     if (!title || !logline) {
       this.messages.push(agentMsg(
         '我没识别到标题或简介 😕。可以这样写：\n\n' +
-        '「标题 **XXX**；简介 **YYY**；画风 **ZZZ**」\n\n' +
-        '画风可以省略。',
+        '「标题 **XXX**；简介 **YYY**」\n\n' +
+        '画风请在左侧工作台创建系列时选择 DNA（创建后不可更改）。',
       ));
       this.emit();
       return;
     }
-    this.messages.push(agentMsg(`好的，我来创建：**${title}**\n简介：${logline}${style ? `\n画风：${style}` : ''}`));
+    this.messages.push(agentMsg(`好的，我来创建：**${title}**\n简介：${logline}`));
     this.emit();
     try {
-      await this.ensureSeries({ title, logline, style });
+      await this.ensureSeries({ title, logline });
       this.messages.push(agentMsg('项目已创建 ✅。现在我开始生成世界观，请稍候 30-60 秒……'));
       this.emit();
       await this.runGenerateWorldview();
@@ -328,17 +339,17 @@ export class AgentEngine {
     }
   }
 
-  private async runGenerateWorldview(): Promise<void> {
+  private async runGenerateWorldview(hint?: string): Promise<void> {
     this.stage = 'reviewing_worldview';
-    this.messages.push(agentMsg('正在生成世界观…', { pending: true }));
+    this.messages.push(agentMsg(hint ? '正在按你的意见重新生成世界观…' : '正在生成世界观…', { pending: true }));
     this.emit();
     try {
-      const w = await this.genWorldview();
+      const w = await this.genWorldview(hint);
       // 移除 pending
       this.messages = this.messages.filter(m => !m.pending);
       if (!w) throw new Error('生成世界观失败');
       this.messages.push(agentMsg(
-        '这是根据你的简介生成的世界观。请审阅：',
+        hint ? '已按你的意见重新生成世界观。请审阅：' : '这是根据你的简介生成的世界观。请审阅：',
         { card: { kind: 'worldview', worldview: w } },
       ));
       this.emit();
@@ -352,7 +363,7 @@ export class AgentEngine {
   private async regenerateWorldviewWithHint(hint: string): Promise<void> {
     this.messages.push(agentMsg(`好，按你说的偏好重新生成：${hint}`));
     this.emit();
-    await this.runGenerateWorldview();
+    await this.runGenerateWorldview(hint);
   }
 
   private async approveWorldview(): Promise<void> {
@@ -362,16 +373,16 @@ export class AgentEngine {
     await this.runGenerateCharacters();
   }
 
-  private async runGenerateCharacters(): Promise<void> {
+  private async runGenerateCharacters(hint?: string): Promise<void> {
     this.stage = 'reviewing_characters';
-    this.messages.push(agentMsg('正在生成角色（每个角色会附带参考图）…', { pending: true }));
+    this.messages.push(agentMsg(hint ? '正在按你的意见重新生成角色（每个角色会附带参考图）…' : '正在生成角色（每个角色会附带参考图）…', { pending: true }));
     this.emit();
     try {
-      const chars = await this.genCharacters();
+      const chars = await this.genCharacters(hint);
       this.messages = this.messages.filter(m => !m.pending);
       if (!chars || chars.length === 0) throw new Error('生成角色失败');
       this.messages.push(agentMsg(
-        `生成了 **${chars.length}** 个核心角色。请审阅：`,
+        hint ? `已按你的意见重新生成了 **${chars.length}** 个角色。请审阅：` : `生成了 **${chars.length}** 个核心角色。请审阅：`,
         { card: { kind: 'characters', characters: chars } },
       ));
       this.emit();
@@ -385,7 +396,7 @@ export class AgentEngine {
   private async regenerateCharactersWithHint(hint: string): Promise<void> {
     this.messages.push(agentMsg(`好，按你的反馈重做：${hint}`));
     this.emit();
-    await this.runGenerateCharacters();
+    await this.runGenerateCharacters(hint);
   }
 
   private async approveCharacters(): Promise<void> {
@@ -531,17 +542,6 @@ export class AgentEngine {
     await this.askFreeformQuestion(t);
   }
 
-  /** 找出现有页面里有匹配名称的（章节/页）。 */
-  private findPageByHint(s: Series, hint: string): SeriesPage | null {
-    const m = hint.match(/第\s*(\d+)\s*页/);
-    if (m) {
-      const idx = parseInt(m[1], 10) - 1;
-      const allPages = s.chapters.flatMap(c => c.pages);
-      return allPages[idx] || null;
-    }
-    return null;
-  }
-
   private parsePageCount(text: string): number | null {
     const m = text.match(/(\d+)\s*页/);
     if (m) return Math.max(4, Math.min(60, parseInt(m[1], 10)));
@@ -569,15 +569,17 @@ export class AgentEngine {
   }
 
   private async runGeneratePage(pageId: string): Promise<void> {
-    this.messages.push(agentMsg('正在生成整页图片（可能需要 30-60 秒）…', { pending: true }));
+    this.messages.push(agentMsg('正在生成整页图片（分镜逐格出图，可能需要几分钟）…', { pending: true }));
     this.emit();
     try {
       const page = await this.generatePage(pageId);
       this.messages = this.messages.filter(m => !m.pending);
       if (!page) throw new Error('生成失败');
+      // P2-14：页级 generatedImage 已废弃，改判「每格都有图」
+      const allDone = page.panels.length > 0 && page.panels.every(p => !!p.imageUrl);
       this.messages.push(agentMsg(
-        page.generatedImage
-          ? `✅ 第 ${page.pageNumber} 页生成完成。还想调吗？可以说「**改这一页：xxx**」。`
+        allDone
+          ? `✅ 第 ${page.pageNumber} 页生成完成（${page.panels.length} 格）。还想调吗？可以说「**改这一页：xxx**」。`
           : `第 ${page.pageNumber} 页状态：${page.status}${page.errorMessage ? ` — ${page.errorMessage}` : ''}`,
       ));
       this.emit();
@@ -695,15 +697,9 @@ export class AgentEngine {
     }
   }
 
-  private async handleMutation(m: { action: 'delete' | 'rename' | 'change_style'; target?: string; value?: string }): Promise<void> {
+  private async handleMutation(m: { action: 'delete' | 'rename'; target?: string; value?: string }): Promise<void> {
     const s = this.getSeries();
     if (!s) return;
-    if (m.action === 'change_style' && m.value) {
-      await this.patchSeries({ style: m.value });
-      this.messages.push(agentMsg(`画风已更新为 **${m.value}**。`));
-      this.emit();
-      return;
-    }
     if (m.action === 'delete' && m.target) {
       const target = m.target;
       // 找匹配角色
@@ -738,25 +734,25 @@ export class AgentEngine {
 // ──────────────────────────────────────────────────────────────────────────
 
 /**
- * 把用户的一段话拆成 {title, logline, style}。
+ * 把用户的一段话拆成 {title, logline}。
  * 支持：
- *   "标题 X；简介 Y；画风 Z"
- *   "我想画 X，标题是 Y，画风 Z"
+ *   "标题 X；简介 Y"
+ *   "我想画 X，标题是 Y"
  *   "X"（单句）
+ * 画风不再从此处接受 —— 创建系列时由 DNA 选择器统一锁定（见 SeriesWorkbench / shared/types）。
  */
-export function parseLogline(text: string): { title?: string; logline?: string; style?: string } {
+export function parseLogline(text: string): { title?: string; logline?: string } {
   // 1) "标题 **xxx**" / "标题：xxx" / "标题 xxx"
   const title = extract(text, /标题\s*[:：]?\s*\*?\*?\s*([^；;。\n]+?)(?=\s*(?:；|;|\n|简介|$))/, /标题\s*[:：]?\s*\*?\*?\s*(.+?)(?=\s|$)/);
-  const logline = extract(text, /(?:简介|一句话故事)\s*[:：]?\s*\*?\*?\s*([^；;。\n]+?)(?=\s*(?:；|;|\n|画风|$))/, /(?:简介|一句话故事)\s*[:：]?\s*\*?\*?\s*(.+?)(?=\s|$)/);
-  const style = extract(text, /(?:画风|风格)\s*[:：]?\s*\*?\*?\s*(.+?)$/, /(?:画风|风格)\s*[:：]?\s*(.+?)$/);
+  const logline = extract(text, /(?:简介|一句话故事)\s*[:：]?\s*\*?\*?\s*([^；;。\n]+?)(?=\s*(?:；|;|\n|$))/, /(?:简介|一句话故事)\s*[:：]?\s*\*?\*?\s*(.+?)(?=\s|$)/);
 
-  if (title && logline) return { title: title.trim(), logline: logline.trim(), style: style?.trim() };
+  if (title && logline) return { title: title.trim(), logline: logline.trim() };
   // 没有明确标记时，整段当作 logline，标题取前 12 字
   if (!title && !logline && text.length > 0) {
     const first = text.split(/[。\n;；]/)[0].trim();
     return { title: first.slice(0, 12) || '未命名系列', logline: text.trim() };
   }
-  return { title: title?.trim(), logline: logline?.trim(), style: style?.trim() };
+  return { title: title?.trim(), logline: logline?.trim() };
 }
 
 function extract(text: string, primary: RegExp, fallback?: RegExp): string | undefined {

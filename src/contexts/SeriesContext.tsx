@@ -36,17 +36,17 @@ interface SeriesContextValue {
   // 当前系列
   currentSeries: Series | null;
   setCurrentSeriesId: (id: string | null) => void;
-  createSeries: (input: { title: string; logline: string; style?: string }) => Promise<Series>;
-  patchSeries: (patch: Partial<Pick<Series, 'title' | 'style' | 'logline'>>) => Promise<Series | null>;
+  createSeries: (input: { title: string; logline: string; dnaKey?: import('../services/modelConfig').DnaKey }) => Promise<Series>;
+  patchSeries: (patch: Partial<Pick<Series, 'title' | 'logline'>>) => Promise<Series | null>;
   deleteSeries: (id: string) => Promise<void>;
   refreshCurrent: () => Promise<void>;
   // 步骤状态
   step: StoryCreatorStep;
   setStep: (s: StoryCreatorStep) => void;
-  // Step 1 → Step 2
-  generateWorldviewForCurrent: () => Promise<Worldview | null>;
+  // Step 1 → Step 2（hint = 用户对上一版的修改意见，透传给生成端点）
+  generateWorldviewForCurrent: (hint?: string) => Promise<Worldview | null>;
   // Step 2 → Step 3
-  generateCharactersForCurrent: () => Promise<SeriesCharacter[] | null>;
+  generateCharactersForCurrent: (hint?: string) => Promise<SeriesCharacter[] | null>;
   addCharacterToCurrent: (input: {
     name: string;
     role: 'protagonist' | 'antagonist' | 'supporting';
@@ -147,7 +147,7 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  const create = useCallback(async (input: { title: string; logline: string; style?: string }) => {
+  const create = useCallback(async (input: { title: string; logline: string; dnaKey?: import('../services/modelConfig').DnaKey }) => {
     setBusy(true); setError(null);
     try {
       const res = await apiCreateSeries(input);
@@ -163,7 +163,7 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
     }
   }, [refreshList]);
 
-  const patch = useCallback(async (patchObj: Partial<Pick<Series, 'title' | 'style' | 'logline'>>) => {
+  const patch = useCallback(async (patchObj: Partial<Pick<Series, 'title' | 'logline'>>) => {
     if (!currentSeries) return null;
     setBusy(true); setError(null);
     try {
@@ -192,11 +192,11 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
     }
   }, [currentSeries, refreshList]);
 
-  const genWorldview = useCallback(async () => {
+  const genWorldview = useCallback(async (hint?: string) => {
     if (!currentSeries) return null;
     setBusy(true); setError(null);
     try {
-      const res = await generateWorldview(currentSeries.id);
+      const res = await generateWorldview(currentSeries.id, hint);
       await refreshCurrent();
       setStep('characters');
       return res.worldview;
@@ -208,11 +208,11 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
     }
   }, [currentSeries, refreshCurrent]);
 
-  const genCharacters = useCallback(async () => {
+  const genCharacters = useCallback(async (hint?: string) => {
     if (!currentSeries) return null;
     setBusy(true); setError(null);
     try {
-      const res = await generateCharacters(currentSeries.id);
+      const res = await generateCharacters(currentSeries.id, hint);
       await refreshCurrent();
       setStep('chapters');
       return res.characters;

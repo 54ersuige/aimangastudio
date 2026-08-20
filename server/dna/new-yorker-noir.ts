@@ -1,32 +1,20 @@
+// @dna-checksum: 800b15eef10b0fb30ff06b389f23ae030de6c7f29904f7b3a6a8330d07584c72
 /**
  * ═══════════════════════════════════════════════════════════════════════════
- *  GRAPHIC NOVEL 视觉 DNA —— 系列最高优先级 Art Direction
+ *  DNA 预设一：New Yorker × Tomine 都市写实 × Graphic Novel（v1.1）
  * ═══════════════════════════════════════════════════════════════════════════
  *
- *  本文件是**系统级**视觉规范，不是用户可选的"画风预设"。
- *  - 应用范围：本项目所有 AI 生成的图像、文字描述、章节大纲、分镜脚本。
- *  - 不可被用户关闭：创建任何系列时自动应用，且优先级最高。
- *  - 修改流程：直接编辑本文件，重新启动即可全局生效。
+ *  本预设是该项目的"默认 DNA"。
+ *  原 graphic-novel-dna.ts 的全部内容迁移到此 key 下；
+ *  system 级 /api/text、/api/image 与所有业务端点统一通过 dna-inject 注入。
  *
- *  v1.0 (locked 2026-08)：经过 3 轮迭代后锁定。
- *    - v0 → AI 默认出"日漫/AI 漂亮插画"（fail）
- *    - v1 → 系统约束起效，眼睛/表情/色彩/留白都接近目标
- *    - 当前限制：Agnes 模型的线条粗度上限，无法做到 Tomine 的 hairline 笔触
+ *  人类可读版本：docs/style-dna/new-yorker-noir.md
  *
- *  v1.1 (2026-08)：在 v1.0-locked 基础上做三处调整：
- *    1. 脸：从"real Chinese with slight imperfections"改为"现代 21 世纪真实华人脸，
- *       干净皮肤、不网红化、不日漫化、不二次元化，但不刻意加重毛孔/雀斑"
- *    2. 色调：从"warm gray, earth tones"偏向 **New Yorker 单幅叙事色调**
- *       ——奶油黄/燕麦底色、粉/赭/红棕点缀、印刷质感
- *    3. 整体气质：从 Tomine 单坐标升级为 **New Yorker 单幅叙事 × Adrian Tomine × Graphic Novel**
- *       三维融合（New Yorker 是"皮"、Tomine 是"骨"、Graphic Novel 是"形"）
- *
- *  这是用户（导演）写的完整 Art Direction 规范，已固化进系统。
- *  来源：用户在 2026-08 对话中提供的完整风格定义文档。
+ *  修改本文件后请同步修改 .md，并保留 README 中描述的 7 个导出字段顺序与名称。
+ *  @dna-checksum 由 server/dna/checksum.ts 启动时重算校验。
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
-/** 视觉总定义。 */
 export const VISUAL_DEFINITION = `
 New Yorker 单幅叙事 × Adrian Tomine 都市写实 × 欧美独立 Graphic Novel 的文学气质。
 New Yorker 是 "皮"（色调、印刷感、单幅成立）、Tomine 是 "骨"（人物克制、距离感、日常诚实）、
@@ -37,7 +25,6 @@ Graphic Novel 是 "形"（电影化镜头、留白、一格一帧）。
 画面像一部安静的独立电影，被切成了一组适合手机阅读的漫画镜头。
 `;
 
-/** 视觉关键词（正向）。 */
 export const VISUAL_KEYWORDS = [
   'New Yorker 单幅叙事', '杂志插画质感', '印刷品质感',
   '欧美文艺', '独立漫画', 'Graphic Novel', '都市生活',
@@ -47,7 +34,6 @@ export const VISUAL_KEYWORDS = [
   '奶油黄底', '燕麦色', '粉赭红棕点缀', '单幅独立成立',
 ];
 
-/** 视觉关键词（反向 —— 必须避开）。 */
 export const VISUAL_FORBIDDEN = [
   '动画片', '商业儿童绘本', '网红漫画', '日漫', '二次元',
   'Q版', '大头', '大眼', '夸张五官', '过度精致', '网红脸',
@@ -62,9 +48,6 @@ export const VISUAL_FORBIDDEN = [
 ];
 
 /**
- * 用于图片生成的标准 negative prompt 片段 —— 任何生图请求都会自动拼接。
- * 注意：模型是否真的遵守这些 negative 项取决于模型本身。
- *
  * v1.0-locked：注意 Agnes content policy 会拒绝包含 crying/tears 等词过密的 prompt，
  * 所以这里集中放在一个 negative_prompt 字段里、prompt 正文中不再列负面词。
  */
@@ -85,14 +68,6 @@ export const IMAGE_NEGATIVE_PROMPT = [
   'looking at camera', 'eye contact with viewer',
 ].join(', ');
 
-/**
- * 系统级正向 prompt 前缀（每次图片生成都强制注入）。
- * 这是把"约束"翻译成 AI 能稳定理解的英文指令。
- *
- * v1.1：New Yorker 单幅叙事 × Adrian Tomine × Graphic Novel 三维融合。
- *       脸：现代 21 世纪真实华人（不网红化、不二次元化，但不刻意毛孔/雀斑）
- *       色调：New Yorker 印刷感的暖底色（奶油黄/燕麦）+ 粉/赭/红棕点缀
- */
 export const IMAGE_SYSTEM_PROMPT = `
 You are drawing a single panel for an adult literary graphic novel,
 in the tradition of New Yorker spot illustration crossed with
@@ -142,8 +117,8 @@ Specifically:
     a sharp chin. NOT a wide caricature jaw either.
   - Skin: CLEAN, SMOOTH, NATURAL SKIN TONE. Normal Chinese
     skin color (warm beige to light tan, not porcelain,
-    not yellow). NO visible pores,, NO freckles, NO
-    beauty marks. Sub skin looks like ordinary young-to-middle-
+    not yellow). NO visible pores, NO freckles, NO
+    beauty marks. Skin looks like ordinary young-to-middle-
     aged Chinese skin — healthy, untreated, well-rested.
   - Hair: modern cut. Could be a bob, shoulder-length, short
     crop, or short back and sides for men. Natural color
@@ -220,10 +195,6 @@ THIS IS a single quiet frame in a quiet literary comic
 about ordinary people. That is all.
 `;
 
-/**
- * 人物设计的硬性 prompt 段。
- * 任何 prompt 里包含人物时，AI 必须按此渲染。
- */
 export const CHARACTER_HARD_CONSTRAINTS = `
 Character design rules (must obey strictly):
 - Real Chinese person, ordinary build, ordinary features, ordinary clothing
@@ -232,7 +203,7 @@ Character design rules (must obey strictly):
   shouting, shocked face, or any theatrical emotion
 - Subtle emotion only: a slight frown, a pause, eyes looking away,
   a quiet mouth. Emotion lives in posture and gaze, not on the face.
-- Realistic skin: visible pores, slight imperfections, no plastic airbrushed look
+- Realistic skin: clean and natural, no plastic airbrushed look
 - Clothing is plain and lived-in: cotton t-shirts, simple cardigans,
   plain trousers, simple shoes. No fashion-editor styling, no accessories.
 - Hair is normal hair, not anime hair. No unusual colors.
@@ -241,9 +212,6 @@ Character design rules (must obey strictly):
   no large heads on small bodies.
 `;
 
-/**
- * 镜头语言硬约束。
- */
 export const COMPOSITION_HARD_CONSTRAINTS = `
 Composition rules (cinematic, not comic-strip):
 - Treat each frame as a single film shot, NOT a comic panel
@@ -260,9 +228,6 @@ Composition rules (cinematic, not comic-strip):
   feel like a place you have actually been, not a designed set.
 `;
 
-/**
- * 场景设计的硬性 prompt 段。
- */
 export const SCENE_HARD_CONSTRAINTS = `
 Scene / environment rules:
 - Settings are everyday real places: homes (living room, kitchen,
@@ -280,9 +245,6 @@ Scene / environment rules:
   ordinary world.
 `;
 
-/**
- * 文字与画面关系的硬规则。
- */
 export const TEXT_VS_IMAGE_RULES = `
 Text rules:
 - Most dialogue, narration, and inner monologue go OUTSIDE the image,
@@ -293,9 +255,6 @@ Text rules:
   The image should read like a film still, not a comic panel.
 `;
 
-/**
- * 表情与情绪的硬约束。
- */
 export const EXPRESSION_HARD_CONSTRAINTS = `
 Expression rules (this is critical):
 - Default expression: neutral, calm, slightly inward.
@@ -312,38 +271,19 @@ Expression rules (this is critical):
 - The reader should feel the emotion, not be told what it is.
 `;
 
-/**
- * 把以上所有约束组装成一个可注入到任意 prompt 前缀/后缀的字符串。
- *
- * @param includeCharacter  是否包含人物设计硬约束（场景若无人可关掉）
- * @param includeScene      是否包含场景约束
- * @returns 标准化的 system 指令块
- */
-export function buildImageSystemDirective(opts: {
-  includeCharacter?: boolean;
-  includeScene?: boolean;
-} = {}): string {
-  const parts: string[] = [IMAGE_SYSTEM_PROMPT];
-  if (opts.includeCharacter !== false) parts.push(CHARACTER_HARD_CONSTRAINTS);
-  parts.push(COMPOSITION_HARD_CONSTRAINTS);
-  parts.push(EXPRESSION_HARD_CONSTRAINTS);
-  if (opts.includeScene !== false) parts.push(SCENE_HARD_CONSTRAINTS);
-  parts.push(TEXT_VS_IMAGE_RULES);
-  return parts.join('\n\n');
-}
+export const VISUAL_PHILOSOPHY = `
+本系列不是"把现实画得漂亮"，而是"认真观察现实"。
+不是"制造情绪"，而是"捕捉已经存在的情绪"。
+不是"告诉读者应该怎么想"，而是"给读者一个值得想一想的瞬间"。
+不是"漫画人物生活在漫画世界"，而是"普通人生活在真实世界里，只不过被我们认真地记录下来"。
 
-/**
- * 把以上所有约束组装成文字生成（章节大纲/分镜/对话）用的 system 指令块。
- */
-export function buildTextSystemDirective(): string {
-  return [
-    IMAGE_SYSTEM_PROMPT,
-    CHARACTER_HARD_CONSTRAINTS,
-    COMPOSITION_HARD_CONSTRAINTS,
-    SCENE_HARD_CONSTRAINTS,
-    EXPRESSION_HARD_CONSTRAINTS,
-    TEXT_VS_IMAGE_RULES,
-    `
+New Yorker × Tomine × Graphic Novel 三维融合：
+New Yorker 是 "皮"（色调、印刷感、单幅成立）、
+Tomine 是 "骨"（人物克制、距离感、日常诚实）、
+Graphic Novel 是 "形"（电影化镜头、留白、一格一帧）。
+`;
+
+export const STORYTELLING_RULES = `
 You are writing for a literary graphic novel in the style of an
 independent European / American comic. Your job is NOT to make the
 story "exciting". Your job is to make it true.
@@ -359,16 +299,8 @@ Storytelling rules:
 - Dialogue should be sparse, ordinary, real. People do not speak
   in elegant sentences in real life.
 - The story should leave the reader with a question, not a moral.
-`,
-  ].join('\n\n');
-}
+`;
 
-/**
- * 出图后自检清单 —— 用于前端 / Agent 让用户快速判断"这张图对了没"。
- * 每一条都是一个 YES/NO 问题。
- *
- * v1.1：增加"现代华人脸"和"New Yorker 色调"两条新维度。
- */
 export const IMAGE_SELF_CHECK_ITEMS: Array<{ id: string; question: string; failMeans: string }> = [
   { id: 'anime', question: '这张图不像日漫 / 二次元 / Q版？', failMeans: '画面太"漫画"了' },
   { id: 'cartoon-face', question: '人物面孔是现代 21 世纪真实华人（没有大眼/网红脸/二次元眼/夸张五官）？', failMeans: '面孔偏离真实' },
@@ -385,15 +317,4 @@ export const IMAGE_SELF_CHECK_ITEMS: Array<{ id: string; question: string; failM
   { id: 'movie-still', question: '整体感觉像"安静的独立电影一帧"，而非"漫画格"？', failMeans: '太"漫画"' },
 ];
 
-/** 视觉哲学总纲（作为总开关）。 */
-export const VISUAL_PHILOSOPHY = `
-本系列不是"把现实画得漂亮"，而是"认真观察现实"。
-不是"制造情绪"，而是"捕捉已经存在的情绪"。
-不是"告诉读者应该怎么想"，而是"给读者一个值得想一想的瞬间"。
-不是"漫画人物生活在漫画世界"，而是"普通人生活在真实世界里，只不过被我们认真地记录下来"。
-
-New Yorker × Tomine × Graphic Novel 三维融合：
-New Yorker 是 "皮"（色调、印刷感、单幅成立）、
-Tomine 是 "骨"（人物克制、距离感、日常诚实）、
-Graphic Novel 是 "形"（电影化镜头、留白、一格一帧）。
-`;
+export const STORYTELLING_TONE_RULES = STORYTELLING_RULES;

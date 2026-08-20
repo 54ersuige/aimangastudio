@@ -15,7 +15,7 @@ export default function App(): React.ReactElement {
 
 function AppInner(): React.ReactElement {
   const { language, setLanguage } = useLocalization();
-  const { config, updateConfig, isModalOpen, setIsModalOpen, saveToServer, isLoading: isModelConfigLoading, error: modelConfigError, clearError } = useModelConfig();
+  const { config, dnaList, updateConfig, isModalOpen, setIsModalOpen, saveToServer, isLoading: isModelConfigLoading, error: modelConfigError, clearError } = useModelConfig();
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--paper)' }}>
@@ -28,6 +28,7 @@ function AppInner(): React.ReactElement {
         isOpen={isModalOpen}
         onClose={() => { setIsModalOpen(false); clearError(); }}
         config={config}
+        dnaList={dnaList}
         onChange={updateConfig}
         onSave={saveToServer}
         isLoading={isModelConfigLoading}

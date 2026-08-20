@@ -426,9 +426,6 @@ function PagePreviewCard({ chapterTitle, page }: { chapterTitle: string; page: i
       <div className="kicker kicker--accent" style={{ marginBottom: '0.5rem' }}>
         分镜预览 · {chapterTitle} · 第 {page.pageNumber} 页
       </div>
-      {page.generatedImage && (
-        <img src={page.generatedImage} alt="" style={{ width: '100%', marginBottom: '0.5rem' }} />
-      )}
       {page.sceneDescription && (
         <div style={{ fontSize: '0.75rem', lineHeight: 1.5, whiteSpace: 'pre-wrap', background: 'var(--bg-soft)', padding: '0.5rem', marginBottom: '0.5rem' }}>{page.sceneDescription}</div>
       )}

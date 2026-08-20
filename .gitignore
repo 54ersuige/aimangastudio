@@ -16,8 +16,9 @@ dist-ssr
 .env
 server/runtime-config.json
 
-# 运行时数据（含 base64 图片，体积巨大）
+# 运行时数据（图片文件 + 精简后的元数据，体积大且为用户内容）
 server/series-data.json
+server/data/
 
 # 一键启动脚本产生的后台日志（start.sh 使用）
 .backend.log

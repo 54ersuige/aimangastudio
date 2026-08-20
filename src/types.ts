@@ -1,68 +1,20 @@
 // ========== 系列漫画（多章多页）==========
+// 领域类型统一收口在 shared/types.ts（前后端单一事实来源），此处仅 re-export。
 
-export interface Worldview {
-  summary: string;
-  background: string;
-  era: string;
-  artStyle: string;
-  paletteMood: string;
-}
+export type {
+  Worldview,
+  CharacterRole,
+  SeriesCharacter,
+  Panel,
+  PageStatus,
+  SeriesPage,
+  Chapter,
+  Series,
+  StoryCreatorStep,
+  TaskState,
+} from '../shared/types';
 
-export type CharacterRole = 'protagonist' | 'antagonist' | 'supporting';
-
-export interface SeriesCharacter {
-  id: string;
-  name: string;
-  role: CharacterRole;
-  description: string;
-  appearance: string;
-  referenceImage?: string;
-  voiceTone: string;
-}
-
-export interface Panel {
-  index: number;
-  description: string;
-  dialogue?: string;
-  characterIds: string[];
-  imageUrl?: string;
-}
-
-export type PageStatus = 'draft' | 'generating' | 'done' | 'error';
-
-export interface SeriesPage {
-  id: string;
-  pageNumber: number;
-  title: string;
-  sceneDescription: string;
-  panels: Panel[];
-  generatedImage?: string;
-  characterIds: string[];
-  status: PageStatus;
-  errorMessage?: string;
-}
-
-export interface Chapter {
-  id: string;
-  title: string;
-  summary: string;
-  pageCount: number;
-  pages: SeriesPage[];
-}
-
-export interface Series {
-  id: string;
-  title: string;
-  logline: string;
-  worldview?: Worldview;
-  style: string;
-  characters: SeriesCharacter[];
-  chapters: Chapter[];
-  createdAt: string;
-  updatedAt: string;
-}
-
-export type StoryCreatorStep = 'logline' | 'worldview' | 'characters' | 'chapters' | 'pages';
+import type { Worldview, SeriesCharacter, Chapter, SeriesPage } from '../shared/types';
 
 // ========== 会话式 Agent 工作台 ==========
 

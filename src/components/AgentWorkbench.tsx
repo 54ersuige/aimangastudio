@@ -57,8 +57,8 @@ function AgentWorkbenchInner(props: {
     getSeries: () => ctx.currentSeries,
     ensureSeries: async (input) => ctx.createSeries(input),
     patchSeries: async (p) => ctx.patchSeries(p),
-    genWorldview: () => ctx.generateWorldviewForCurrent(),
-    genCharacters: () => ctx.generateCharactersForCurrent(),
+    genWorldview: (hint?: string) => ctx.generateWorldviewForCurrent(hint),
+    genCharacters: (hint?: string) => ctx.generateCharactersForCurrent(hint),
     genChapters: (target) => ctx.generateChaptersForCurrent(target),
     breakdownPage: async (id) => {
       await ctx.breakdownSelectedPage();

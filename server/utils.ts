@@ -1,4 +1,23 @@
 import type { Response as ExpressResponse } from 'express';
+import { appendFileSync, mkdirSync } from 'fs';
+import { resolve, dirname, join } from 'path';
+import { fileURLToPath } from 'url';
+
+const LOG_DIR = resolve(dirname(fileURLToPath(import.meta.url)), 'logs');
+const GEN_LOG_PATH = join(LOG_DIR, 'generations.jsonl');
+
+/**
+ * 生成审计日志：每次文/图生成把完整 prompt 落盘为 JSONL。
+ * 排查「这张图当时是怎么生成的 / 画风为什么不对」时可直接回溯。
+ */
+export function logGeneration(kind: string, payload: Record<string, unknown>): void {
+  try {
+    mkdirSync(LOG_DIR, { recursive: true });
+    appendFileSync(GEN_LOG_PATH, JSON.stringify({ ts: new Date().toISOString(), kind, ...payload }) + '\n');
+  } catch {
+    // 日志失败不影响主流程
+  }
+}
 
 export interface TextRequest {
   prompt: string;

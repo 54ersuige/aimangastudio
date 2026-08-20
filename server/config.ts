@@ -1,12 +1,19 @@
 import { z } from 'zod';
 import dotenv from 'dotenv';
-import { existsSync, readFileSync, writeFileSync } from 'fs';
-import { resolve } from 'path';
+import { existsSync, readFileSync, writeFileSync, statSync } from 'fs';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
+import { DNA_KEYS } from './dna/registry.js';
 
-dotenv.config({ path: resolve(process.cwd(), '../.env') });
+const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
+
+// 路径基于模块真实位置而非 process.cwd() —— 从任意目录启动都不会找错文件
+dotenv.config({ path: resolve(SERVER_DIR, '../.env') });
 
 export const TextProviderSchema = z.enum(['gemini', 'deepseek', 'agnes', 'openai-compatible']);
 export const ImageProviderSchema = z.enum(['gemini', 'step', 'minimax', 'agnes', 'openai-compatible']);
+
+export const DnaKeySchema = z.enum(DNA_KEYS);
 
 export const ModelConfigSchema = z.object({
   text: z.object({
@@ -35,11 +42,19 @@ export const ModelConfigSchema = z.object({
     timeout: 120000,
     extraParams: {},
   }),
+  /**
+   * 默认 DNA key。新建系列、/api/text、/api/image 未指定 dnaKey 时使用。
+   * 创建系列后该字段被冻结到 series.dnaKey，不再受全局变更影响（防风格漂移）。
+   */
+  dnaKey: DnaKeySchema.default('new-yorker-noir'),
 });
 
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
 
-const CONFIG_PATH = resolve(process.cwd(), 'runtime-config.json');
+const CONFIG_PATH = resolve(SERVER_DIR, 'runtime-config.json');
+
+/** 配置缓存：按 mtime 失效。此前每个请求都 existsSync+readFileSync+zod parse。 */
+let configCache: { mtime: number; value: ModelConfig } | null = null;
 
 function loadDefaultsFromEnv(): ModelConfig {
   return {
@@ -59,26 +74,43 @@ function loadDefaultsFromEnv(): ModelConfig {
       timeout: Number(process.env.IMAGE_TIMEOUT || '120000'),
       extraParams: process.env.IMAGE_EXTRA_PARAMS ? JSON.parse(process.env.IMAGE_EXTRA_PARAMS) : {},
     },
+    dnaKey: (process.env.DEFAULT_DNA_KEY as any) || 'new-yorker-noir',
   };
 }
 
 export function getConfig(): ModelConfig {
-  const defaults = loadDefaultsFromEnv();
-  if (!existsSync(CONFIG_PATH)) {
-    return defaults;
-  }
+  let mtime = 0;
   try {
-    const raw = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
-    return ModelConfigSchema.parse({ ...defaults, ...raw });
-  } catch (e) {
-    console.warn('Failed to load runtime config, using env defaults:', e);
-    return defaults;
+    mtime = statSync(CONFIG_PATH).mtimeMs;
+  } catch {
+    // 配置文件不存在，走 env 默认值
   }
+  if (configCache && configCache.mtime === mtime) return configCache.value;
+
+  const defaults = loadDefaultsFromEnv();
+  let value: ModelConfig;
+  if (!existsSync(CONFIG_PATH)) {
+    value = defaults;
+  } else {
+    try {
+      const raw = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
+      value = ModelConfigSchema.parse({ ...defaults, ...raw });
+    } catch (e) {
+      console.warn('Failed to load runtime config, using env defaults:', e);
+      value = defaults;
+    }
+  }
+  configCache = { mtime, value };
+  return value;
 }
 
 export function saveConfig(config: ModelConfig): ModelConfig {
   const validated = ModelConfigSchema.parse(config);
   writeFileSync(CONFIG_PATH, JSON.stringify(validated, null, 2));
+  // 写后立即刷新缓存（mtime 可能同毫秒，不能等失效）
+  let mtime = 0;
+  try { mtime = statSync(CONFIG_PATH).mtimeMs; } catch { /* ignore */ }
+  configCache = { mtime, value: validated };
   return validated;
 }
 

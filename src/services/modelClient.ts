@@ -1,4 +1,4 @@
-import type { ModelConfig } from './modelConfig';
+import type { ModelConfig, DnaMeta } from './modelConfig';
 import { getServerUrl } from './modelConfig';
 
 function apiUrl(path: string): string {
@@ -84,10 +84,19 @@ export async function generateImage(
   return postJson<ImageGenerationResponse>('/api/image', req, timeout);
 }
 
-export async function fetchServerConfig(): Promise<{ text: ModelConfig['text']; image: ModelConfig['image'] }> {
+export async function fetchServerConfig(): Promise<{
+  text: ModelConfig['text'];
+  image: ModelConfig['image'];
+  dnaKey: ModelConfig['dnaKey'];
+}> {
   return getJson('/api/config');
 }
 
 export async function updateServerConfig(config: ModelConfig): Promise<{ success: boolean }> {
   return postJson('/api/config', config, 30000);
+}
+
+/** 拉取所有可用的 DNA 预设元数据（启动时一次即可，3 选 1 不需要轮询）。 */
+export async function fetchDnaList(): Promise<{ list: DnaMeta[] }> {
+  return getJson('/api/dna');
 }
