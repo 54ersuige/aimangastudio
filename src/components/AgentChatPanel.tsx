@@ -3,6 +3,17 @@ import type { ChatMessage, AgentCard, AgentStage } from '../types';
 import type { AgentEngine } from '../services/agentEngine';
 import { CharacterRelationshipGraph } from './CharacterRelationshipGraph';
 
+function extractReadableText(description: string): string {
+  if (!description) return '';
+  const cleaned = description.replace(
+    /^(远景|中景|近景|特写|全景|侧影|俯拍|仰拍|跟拍|鸟瞰|微距|长镜头)[，,。\s]*/i,
+    '',
+  );
+  const noBrackets = cleaned.replace(/[（(][^）)]*(?:侧影|背影|正面|侧面|背影|特写)[^）)]*[）)]/g, '');
+  if (noBrackets.replace(/\s/g, '').length < 5) return '';
+  return noBrackets.trim();
+}
+
 interface Props {
   engine: AgentEngine;
   stage: AgentStage;
@@ -20,8 +31,8 @@ const STAGES: { key: AgentStage; label: string; num: string }[] = [
   { key: 'awaiting_logline',    label: '灵感',   num: 'I'   },
   { key: 'reviewing_worldview', label: '世界观', num: 'II'  },
   { key: 'reviewing_characters',label: '角色',   num: 'III' },
-  { key: 'reviewing_chapters',  label: '章节',   num: 'IV'  },
-  { key: 'producing_pages',     label: '逐页生成',num: 'V'   },
+  { key: 'reviewing_chapters',  label: '话目',   num: 'IV'  },
+  { key: 'producing_pages',     label: '逐话生成',num: 'V'   },
 ];
 
 export function AgentChatPanel({ engine, stage, messages, busy, onApprove, onRegenerate, onReset, onCollapse }: Props): React.ReactElement {
@@ -175,7 +186,10 @@ export function AgentChatPanel({ engine, stage, messages, busy, onApprove, onReg
             发送 ▸
           </button>
           <div style={{ flex: 1 }} />
-          {['通过', '重新生成', '清空对话'].map(t => (
+          {(stage === 'reviewing_chapters' && messages.some(m => m.card?.kind === 'chapters')
+            ? ['通过，进入逐话', '重新生成', '清空对话']
+            : ['通过', '重新生成', '清空对话']
+          ).map(t => (
             <button
               key={t}
               onClick={() => {
@@ -354,8 +368,8 @@ function CharactersCard({ chars, onApprove, onRegenerate, disabled }: { chars: i
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '24rem', overflowY: 'auto' }}>
         {chars.map(c => (
           <div key={c.id} style={{ display: 'flex', gap: '0.5rem', padding: '0.5rem', background: 'var(--bg-soft)' }}>
-            {c.referenceImage ? (
-              <img src={c.referenceImage} alt={c.name} style={{ width: '3.25rem', height: '3.25rem', objectFit: 'cover', flexShrink: 0 }} />
+            {(c.referenceImages?.[0] || c.referenceImage) ? (
+              <img src={(c.referenceImages && c.referenceImages[0]) || c.referenceImage} alt={c.name} style={{ width: '3.25rem', height: '3.25rem', objectFit: 'cover', flexShrink: 0 }} />
             ) : (
               <div style={{ width: '3.25rem', height: '3.25rem', background: 'var(--bg-paper-2)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.625rem', color: 'var(--ink-3)', flexShrink: 0 }}>无图</div>
             )}
@@ -384,24 +398,24 @@ function ChaptersCard({ chs, onApprove, onRegenerate, disabled }: { chs: import(
   if (!chs || chs.length === 0) {
     return (
       <div className="card fade-in" style={{ padding: '0.75rem 0.875rem', width: '320px', maxWidth: '100%' }}>
-        <div className="kicker kicker--accent" style={{ marginBottom: '0.5rem' }}>章节大纲</div>
-        <div className="deck" style={{ fontSize: '0.8125rem' }}>（暂无章节 — 在主工作台拆分章节。）</div>
+        <div className="kicker kicker--accent" style={{ marginBottom: '0.5rem' }}>话目大纲</div>
+        <div className="deck" style={{ fontSize: '0.8125rem' }}>（暂无话目 — 回复「开始拆分」生成。）</div>
         <ApproveBar onApprove={onApprove} onRegenerate={onRegenerate} disabled={disabled} />
       </div>
     );
   }
   return (
     <div className="card fade-in" style={{ padding: '0.875rem 1rem', width: '320px', maxWidth: '100%' }}>
-      <div className="kicker kicker--accent" style={{ marginBottom: '0.5rem' }}>章节大纲 · {chs.length} 章</div>
+      <div className="kicker kicker--accent" style={{ marginBottom: '0.5rem' }}>话目大纲 · {chs.length} 话</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.375rem', maxHeight: '22rem', overflowY: 'auto' }}>
         {chs.map((c, i) => (
           <div key={c.id} style={{ padding: '0.5rem', background: 'var(--bg-soft)' }}>
             <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '0.25rem' }}>
               <span style={{ fontWeight: 600, fontSize: '0.8125rem' }}>
-                <span className="chapter-num" style={{ fontSize: '0.8125rem', marginRight: '0.25rem' }}>§{toRoman(i + 1)}</span>
-                {c.title}
+                <span className="chapter-num" style={{ fontSize: '0.8125rem', marginRight: '0.25rem' }}>第 {i + 1} 话</span>
+                《{c.title}》
               </span>
-              <span className="mono" style={{ fontSize: '0.625rem', color: 'var(--ink-3)' }}>{c.pages.length} 页</span>
+              <span className="mono" style={{ fontSize: '0.625rem', color: 'var(--ink-3)' }}>{c.pages.reduce((n, p) => n + p.panels.length, 0)} 格</span>
             </div>
             <div style={{ fontSize: '0.6875rem', color: 'var(--ink-2)', lineHeight: 1.45, display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{c.summary}</div>
           </div>
@@ -424,19 +438,21 @@ function PagePreviewCard({ chapterTitle, page }: { chapterTitle: string; page: i
   return (
     <div className="card fade-in" style={{ padding: '0.875rem 1rem', width: '320px', maxWidth: '100%' }}>
       <div className="kicker kicker--accent" style={{ marginBottom: '0.5rem' }}>
-        分镜预览 · {chapterTitle} · 第 {page.pageNumber} 页
+        分镜预览 · {chapterTitle} · {page.panels.length} 格
       </div>
       {page.sceneDescription && (
         <div style={{ fontSize: '0.75rem', lineHeight: 1.5, whiteSpace: 'pre-wrap', background: 'var(--bg-soft)', padding: '0.5rem', marginBottom: '0.5rem' }}>{page.sceneDescription}</div>
       )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.375rem' }}>
-        {page.panels.map(p => (
-          <div key={p.index} style={{ fontSize: '0.6875rem', borderLeft: '2px solid var(--accent)', paddingLeft: '0.5rem' }}>
-            <div className="kicker" style={{ fontSize: '0.5625rem' }}>第 {p.index} 格</div>
-            <div style={{ marginTop: '0.125rem', lineHeight: 1.45 }}>{p.description}</div>
-            {p.dialogue && <div style={{ marginTop: '0.25rem', fontStyle: 'italic', color: 'var(--ink-2)' }}>「{p.dialogue}」</div>}
-          </div>
-        ))}
+        {page.panels.map(p => {
+          const readerText = p.dialogue || extractReadableText(p.description);
+          return (
+            <div key={p.index} style={{ fontSize: '0.6875rem', borderLeft: '2px solid var(--accent)', paddingLeft: '0.5rem' }}>
+              <div className="kicker" style={{ fontSize: '0.5625rem' }}>第 {p.index} 格</div>
+              {readerText && <div style={{ marginTop: '0.125rem', fontStyle: 'italic', color: 'var(--ink-2)', lineHeight: 1.45 }}>{readerText}</div>}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

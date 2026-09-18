@@ -1,0 +1,549 @@
+import { useState, useEffect } from 'react';
+import type { Series, Chapter, SeriesPage } from '../../types';
+import { RedoAltIcon, ChevronRightIcon, ChevronLeftIcon, ChevronDownIcon, ChevronUpIcon, EyeIcon } from '../icons';
+import { extractReadableText } from './text';
+import { Spinner, GeneratingPanelPlaceholder } from './ui';
+
+/**
+ * 话级分镜卡 —— 最小创作 / 发布单位是「话」。
+ *
+ * - 整话所有格跨「内部生成批次」（page，仅内部概念，UI 不再暴露"页"）按顺序合并展示，格号整话连续。
+ * - 每格可独立操作：生成/重掷此格、AI 改写此格、手改文字。
+ * - 批次级操作（手动编辑 / 重拆 / 重画 / 整批改写）挂在批次分隔条上，作为高级修正入口。
+ */
+function EpisodeCard(props: {
+  series: Series;
+  chapter: Chapter;
+  /** 全局话号（1 起，跨章连续） */
+  episodeIndex: number;
+  episodeCount: number;
+  onPrev: () => void;
+  onNext: () => void;
+  busy: boolean;
+  // —— 批次级（内部生成批次） ——
+  onBreakdownBatch: (pageId: string) => Promise<void>;
+  onGenerateBatch: (pageId: string) => Promise<void>;
+  onRegenerateBatch: (pageId: string) => Promise<void>;
+  onRewriteBatch: (pageId: string, instruction: string) => Promise<void>;
+  onEditBatch: (page: SeriesPage) => void;
+  // —— 话级 ——
+  onGenerateAllMissing: () => Promise<void>;
+  onContinue: () => Promise<void>;
+  onPreview: () => void;
+  // —— 格级 ——
+  onGeneratePanel: (pageId: string, panelIndex: number) => Promise<void>;
+  onRewritePanel: (pageId: string, panelIndex: number, instruction: string) => Promise<void>;
+  /** 2026-09-03：兼容性保留（仅改 dialogue）。新接口 onUpdatePanelText 接管三合一。 */
+  onUpdatePanelText: (pageId: string, panelIndex: number, dialogue: string) => Promise<void>;
+  /** 2026-09-03：三合一改写 —— dialogue / narration / innerThought 任选其一或多个。 */
+  onUpdatePanelTextV2: (pageId: string, panelIndex: number, text: { dialogue?: string; narration?: string; innerThought?: string }) => Promise<void>;
+  /** 2026-09-03：让 AI 仅重写一格的"图下文字"（不动 description、不重出图）。 */
+  onRewritePanelText: (pageId: string, panelIndex: number, instruction: string) => Promise<void>;
+}) {
+  const {
+    series, chapter, episodeIndex, episodeCount, onPrev, onNext, busy,
+    onBreakdownBatch, onGenerateBatch, onRegenerateBatch, onRewriteBatch, onEditBatch,
+    onGenerateAllMissing, onContinue, onPreview,
+    onGeneratePanel, onRewritePanel, onUpdatePanelText, onUpdatePanelTextV2, onRewritePanelText,
+  } = props;
+
+  // —— 重拆确认（两步，防误触；4 秒未确认自动复位） ——
+  const [confirmRebreakPage, setConfirmRebreakPage] = useState<string | null>(null);
+  useEffect(() => {
+    if (!confirmRebreakPage) return;
+    const t = setTimeout(() => setConfirmRebreakPage(null), 4000);
+    return () => clearTimeout(t);
+  }, [confirmRebreakPage]);
+
+  // —— 整批改写折叠 ——
+  const [batchRewriteOpen, setBatchRewriteOpen] = useState<string | null>(null);
+  const [batchRewriteDraft, setBatchRewriteDraft] = useState('');
+
+  // —— 单格改写折叠 ——
+  const [panelRewriteTarget, setPanelRewriteTarget] = useState<{ pageId: string; index: number } | null>(null);
+  const [panelRewriteDraft, setPanelRewriteDraft] = useState('');
+
+  // —— 单格改文字折叠 ——
+  // 2026-09-03：扩成"三栏"（对白 / 叙述 / 内心独白），保留旧字段以向后兼容。
+  const [panelTextTarget, setPanelTextTarget] = useState<{ pageId: string; index: number } | null>(null);
+  const [panelTextDraftDlg, setPanelTextDraftDlg] = useState('');
+  const [panelTextDraftNar, setPanelTextDraftNar] = useState('');
+  const [panelTextDraftInner, setPanelTextDraftInner] = useState('');
+  // 「仅让 AI 改文字」指令输入框
+  const [panelTextRewriteDraft, setPanelTextRewriteDraft] = useState('');
+  useEffect(() => {
+    if (!panelTextTarget) return;
+    const pg = chapter.pages.find(x => x.id === panelTextTarget.pageId);
+    const pn = pg?.panels.find(x => x.index === panelTextTarget.index);
+    if (pn) {
+      setPanelTextDraftDlg(pn.dialogue || '');
+      setPanelTextDraftNar(pn.narration || '');
+      setPanelTextDraftInner(pn.innerThought || '');
+    }
+    setPanelTextRewriteDraft('');
+  }, [panelTextTarget, chapter.pages]);
+
+  // —— 本地单格生成指示（后端不整页置 generating，前端自己标） ——
+  const [panelBusy, setPanelBusy] = useState<{ pageId: string; index: number } | null>(null);
+
+  const pagesSorted = [...chapter.pages].sort((a, b) => a.pageNumber - b.pageNumber);
+  const totalPanels = pagesSorted.reduce((n, p) => n + p.panels.length, 0);
+  const doneCount = pagesSorted.reduce((n, p) => n + p.panels.filter(pn => !!pn.imageUrl).length, 0);
+  const missing = totalPanels - doneCount;
+  const lastPage = pagesSorted[pagesSorted.length - 1];
+
+  const handleGeneratePanel = async (pageId: string, index: number) => {
+    setPanelBusy({ pageId, index });
+    try {
+      await props.onGeneratePanel(pageId, index);
+    } finally {
+      setPanelBusy(null);
+    }
+  };
+
+  return (
+    <div>
+      {/* —— 话头 —— */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.5rem' }}>
+        <button onClick={onPrev} disabled={episodeIndex <= 1} className="iconbtn" style={{ border: '1px solid var(--rule-soft)' }}>
+          <ChevronLeftIcon className="w-4 h-4" />
+        </button>
+        <h3 className="headline headline--lg" style={{ flex: 1 }}>
+          第 {episodeIndex} 话《{chapter.title}》
+        </h3>
+        <span className="mono tnum" style={{ fontSize: '0.75rem', color: 'var(--ink-3)' }}>
+          第 {episodeIndex} / {episodeCount} 话
+        </span>
+        <button onClick={onNext} disabled={episodeIndex >= episodeCount} className="iconbtn" style={{ border: '1px solid var(--rule-soft)' }}>
+          <ChevronRightIcon className="w-4 h-4" />
+        </button>
+      </div>
+      {chapter.summary && (
+        <p className="deck" style={{ marginBottom: '0.75rem' }}>{chapter.summary}</p>
+      )}
+
+      {/* —— 进度 + 话规模目标 —— */}
+      <div className="kicker" style={{ marginBottom: '0.25rem' }}>
+        分镜 {totalPanels} 格（{pagesSorted.length} 批 × 6）· 已生成 {doneCount} 格{missing > 0 ? ` · 缺 ${missing} 格` : ''}
+      </div>
+      {pagesSorted.length > 0 && (
+        <div style={{ fontSize: '0.6875rem', marginBottom: '0.75rem', color: totalPanels < 12 ? '#B0413E' : 'var(--ink-3)', lineHeight: 1.5 }}>
+          {totalPanels < 12
+            ? `本话规划 ${pagesSorted.length} 批（${totalPanels} 格），低于每话目标 12-18 格 —— 剧情没讲完就点「续写本话」追加一批（+6 格）。`
+            : totalPanels <= 18
+              ? `符合每话目标 12-18 格（公众号连载单话的常规体量）。`
+              : `已超每话目标 18 格，注意单话节奏；公众号单条长图过长会影响完读率。`}
+        </div>
+      )}
+
+      {/* —— 话级主操作 —— */}
+      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem', alignItems: 'center', flexWrap: 'wrap' }}>
+        {totalPanels === 0 ? (
+          <button
+            onClick={() => pagesSorted[0] && onBreakdownBatch(pagesSorted[0].id)}
+            disabled={busy || pagesSorted.length === 0}
+            title={pagesSorted.length === 0 ? '本话还没有生成批次，请先在上方生成本话' : '为本话第一批拆解分镜（一次拆一批 6 格，保证前后文一致）'}
+            className="btn btn--primary"
+          >
+            {busy ? '拆解中…' : '① 拆解分镜（本批 6 格）▸'}
+          </button>
+        ) : missing > 0 ? (
+          <button onClick={onGenerateAllMissing} disabled={busy} className="btn btn--primary" title="逐批增量补齐缺图，已有图的格不会重画">
+            {busy ? '生成中…' : `② 生成本话缺图（${missing} 格）▸`}
+          </button>
+        ) : (
+          <button onClick={onContinue} disabled={busy} className="btn btn--primary" title="本话已规划批次全部完成；剧情需要继续时，基于已生成格 + 前文剧情追加一批（+6 格）">
+            {busy ? '续写中…' : '续写本话（追加一批 6 格）▸'}
+          </button>
+        )}
+        {totalPanels > 0 && missing > 0 && (
+          <button
+            onClick={onContinue}
+            disabled={busy}
+            title="本话剧情还没讲完、或格数低于 12-18 格目标时使用：基于已生成格 + 前文剧情追加一批（+6 格），不打断已有格"
+            className="btn btn--ghost"
+          >
+            续写本话（追加 6 格）
+          </button>
+        )}
+        <span style={{ flex: 1 }} />
+        <button onClick={onPreview} className="btn btn--ghost" style={{ color: 'var(--accent)' }}>公众号预览 ▸</button>
+      </div>
+
+      {chapter.pages.some(p => p.errorMessage) && (
+        <div style={{ padding: '0.5rem 0.75rem', background: '#FBE9E4', color: 'var(--danger)', fontSize: '0.8125rem', marginBottom: '1rem' }}>
+          {chapter.pages.find(p => p.errorMessage)?.errorMessage}
+        </div>
+      )}
+
+      {/* —— 整话没有分镜 —— */}
+      {totalPanels === 0 && (
+        <div style={{
+          padding: '3rem 1rem', textAlign: 'center',
+          border: '1px dashed var(--rule-soft)', color: 'var(--ink-3)',
+        }}>
+          <EyeIcon className="w-10 h-10 mx-auto mb-2" style={{ opacity: 0.4 }} />
+          <div style={{ fontWeight: 600, color: 'var(--ink-2)' }}>本话还没拆解分镜</div>
+          <div style={{ fontSize: '0.8125rem', marginTop: '0.25rem' }}>本话已规划 {pagesSorted.length} 批；点上方「① 拆解分镜」从第一批开始（每次拆一批 6 格）</div>
+        </div>
+      )}
+
+      {/* —— 批次 × 格 —— */}
+      {pagesSorted.map((pg, pi) => {
+        if (pg.panels.length === 0) return null;
+        const offset = pagesSorted.slice(0, pi).reduce((n, x) => n + x.panels.length, 0);
+        const pgFailed = pg.status === 'error';
+        const pgGenerating = pg.status === 'generating';
+        const pgDone = pg.status === 'done';
+        return (
+          <div key={pg.id} style={{ marginBottom: '1.5rem' }}>
+            {/* —— 批次分隔条 —— */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.625rem', marginBottom: '0.625rem', paddingTop: pi > 0 ? '0.75rem' : 0, borderTop: pi > 0 ? '1px solid var(--rule-soft)' : 'none', flexWrap: 'wrap' }}>
+              <span className="kicker" style={{ fontSize: '0.625rem' }}>
+                第 {offset + 1}–{offset + pg.panels.length} 格（第 {pi + 1} 批）
+              </span>
+              {(pgGenerating || pgFailed) && (
+                <span style={{ fontSize: '0.6875rem', color: pgFailed ? '#B0413E' : 'var(--ink-2)', display: 'inline-flex', alignItems: 'center', gap: '0.375rem' }}>
+                  {pgGenerating && <Spinner small />}
+                  {pgGenerating ? '生成中' : '已中断'}
+                </span>
+              )}
+              <span style={{ flex: 1 }} />
+              <button onClick={() => onEditBatch(pg)} className="btn btn--ghost" style={{ fontSize: '0.6875rem' }}>✏️ 手动编辑</button>
+              {pgGenerating ? null : (
+                <>
+                  <button
+                    onClick={() => {
+                      if (pg.panels.some(pn => pn.imageUrl) && confirmRebreakPage !== pg.id) { setConfirmRebreakPage(pg.id); return; }
+                      setConfirmRebreakPage(null);
+                      void onBreakdownBatch(pg.id);
+                    }}
+                    disabled={busy}
+                    title="重新设计此批分镜（旧分镜与旧图作废）"
+                    className="btn btn--ghost"
+                    style={{ fontSize: '0.6875rem', color: confirmRebreakPage === pg.id ? 'var(--danger)' : undefined }}
+                  >
+                    {confirmRebreakPage === pg.id ? '确认重拆？旧图将作废' : '↻ 重拆此批'}
+                  </button>
+                  {pg.panels.some(pn => pn.imageUrl) && (
+                    <button onClick={() => onRegenerateBatch(pg.id)} disabled={busy} title="此批全部格整批重画" className="btn btn--ghost" style={{ fontSize: '0.6875rem' }}>
+                      <RedoAltIcon className="w-3 h-3" />重画此批
+                    </button>
+                  )}
+                  {pgDone && (
+                    <button
+                      onClick={() => { setBatchRewriteOpen(batchRewriteOpen === pg.id ? null : pg.id); setBatchRewriteDraft(''); }}
+                      className="btn btn--link" style={{ fontSize: '0.6875rem', padding: 0 }}
+                    >
+                      用一句话改此批 {batchRewriteOpen === pg.id ? <ChevronUpIcon className="w-3 h-3" /> : <ChevronDownIcon className="w-3 h-3" />}
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+
+            {/* —— 整批改写输入 —— */}
+            {batchRewriteOpen === pg.id && (
+              <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                <input
+                  className="field-input"
+                  value={batchRewriteDraft}
+                  onChange={e => setBatchRewriteDraft(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && batchRewriteDraft.trim()) {
+                      void onRewriteBatch(pg.id, batchRewriteDraft).then(() => setBatchRewriteOpen(null));
+                    }
+                  }}
+                  placeholder="例如：把场景改成夜晚 / 主角今天穿红裙子（此批会整批重画）"
+                  style={{ flex: 1 }}
+                />
+                <button
+                  onClick={() => { void onRewriteBatch(pg.id, batchRewriteDraft).then(() => setBatchRewriteOpen(null)); }}
+                  disabled={busy || !batchRewriteDraft.trim()}
+                  className="btn btn--primary" style={{ fontSize: '0.75rem' }}
+                >
+                  {busy ? '改写中…' : '应用'}
+                </button>
+              </div>
+            )}
+
+            {/* —— 格网格 —— */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(11rem, 1fr))', gap: '0.75rem' }}>
+              {[...pg.panels].sort((a, b) => a.index - b.index).map(panel => {
+                const panelHasImg = !!panel.imageUrl;
+                const thisBusy = panelBusy?.pageId === pg.id && panelBusy.index === panel.index;
+                let panelState: 'done' | 'generating' | 'error' | 'draft';
+                if (thisBusy) panelState = 'generating';
+                else if (panelHasImg) panelState = 'done';
+                else if (pgFailed) panelState = 'error';
+                else if (pgGenerating) panelState = 'generating';
+                else panelState = 'draft';
+                const dlg = (panel.dialogue || '').trim();
+                return (
+                  <div key={panel.index} className="card" style={{ overflow: 'hidden', padding: 0, position: 'relative' }}>
+                    <div className="panel-thumb" style={{ aspectRatio: '3 / 4', position: 'relative' }}>
+                      {panelHasImg ? (
+                        <img src={panel.imageUrl} alt="" />
+                      ) : panelState === 'generating' ? (
+                        <GeneratingPanelPlaceholder description={panel.description} />
+                      ) : (
+                        <span style={{ fontSize: '0.625rem', textAlign: 'center', padding: '0.5rem', color: panelState === 'error' ? '#B0413E' : 'var(--ink-3)' }}>
+                          {extractReadableText(panel.description) || '待生成'}
+                        </span>
+                      )}
+                      <div style={{ position: 'absolute', right: '0.25rem', bottom: '0.25rem', background: panelState === 'done' ? '#2F7D32' : panelState === 'error' ? '#B0413E' : panelState === 'generating' ? '#1B1A17' : 'rgba(255,255,255,0.85)', color: panelState === 'draft' ? '#5B5547' : '#FAF7EE', fontSize: '0.625rem', padding: '0.125rem 0.375rem', borderRadius: '3px', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                        {panelState === 'done' && '✓ 已生成'}
+                        {panelState === 'generating' && <><Spinner /> 生成中</>}
+                        {panelState === 'error' && '⚠ 出错'}
+                        {panelState === 'draft' && '草稿'}
+                      </div>
+                    </div>
+                    <div style={{ padding: '0.5rem 0.625rem' }}>
+                      <div className="kicker" style={{ fontSize: '0.5625rem' }}>第 {offset + panel.index} 格</div>
+                      {/* —— 2026-09-03：图下文字三层 = 叙述（narration）→ 内心独白（innerThought）→ 对白（dialogue）。
+                           视觉权重从大到小：叙述（带底色）> 内心独白（缩进+斜体）> 对白（小左竖线）。 */}
+                      {panel.narration && (
+                        <div style={{
+                          marginTop: '0.4rem',
+                          padding: '6px 10px',
+                          background: 'rgba(181, 154, 111, 0.10)',
+                          borderLeft: '3px solid #B59A6F',
+                          borderRadius: '2px',
+                          fontSize: '0.6875rem',
+                          fontWeight: 500,
+                          color: 'var(--ink-1)',
+                          lineHeight: 1.55,
+                        }}>
+                          {panel.narration}
+                        </div>
+                      )}
+                      {panel.innerThought && (
+                        <div style={{
+                          marginTop: '0.3rem',
+                          padding: '4px 10px 4px 16px',
+                          fontSize: '0.6875rem',
+                          fontStyle: 'italic',
+                          color: 'var(--ink-2)',
+                          lineHeight: 1.55,
+                          borderLeft: '2px solid var(--ink-3)',
+                        }}>
+                          💭 {panel.innerThought}
+                        </div>
+                      )}
+                      {(() => {
+                        if (!dlg) return null;
+                        const hasBrackets = /^[\s\u4e00-\u9fff]{1,8}[：:]/.test(dlg);
+                        const alreadyWrapped = /^[「『"]/.test(dlg) && /[」』"]$/.test(dlg);
+                        const speakerName = (panel.characterIds ?? []).map(id => series.characters.find(c => c.id === id)?.name).find(Boolean) || '';
+                        if (hasBrackets || alreadyWrapped) {
+                          const wrapped = alreadyWrapped ? dlg : `「${speakerName ? speakerName + '：' : ''}${dlg}」`;
+                          return (
+                            <div style={{
+                              fontSize: '0.6875rem',
+                              fontStyle: 'italic',
+                              color: 'var(--ink-1)',
+                              marginTop: '0.3rem',
+                              lineHeight: 1.45,
+                              paddingLeft: '0.5rem',
+                              borderLeft: '2px solid var(--accent)',
+                            }}>
+                              {wrapped}
+                            </div>
+                          );
+                        }
+                        return (
+                          <div style={{ fontSize: '0.6875rem', color: 'var(--ink-3)', marginTop: '0.25rem', lineHeight: 1.5 }}>
+                            {dlg}
+                          </div>
+                        );
+                      })()}
+                      {/* —— 格级操作 —— */}
+                      {pgGenerating ? null : (
+                        <>
+                          <button
+                            onClick={() => handleGeneratePanel(pg.id, panel.index)}
+                            disabled={busy || !!panelBusy}
+                            title={panelHasImg ? '用当前描述重出这一格（换一张）' : '只生成这一格的图'}
+                            className="btn btn--link"
+                            style={{ fontSize: '0.6875rem', padding: 0, marginTop: '0.375rem' }}
+                          >
+                            {thisBusy ? '生成中…' : panelHasImg ? '⟳ 重出此格' : '▶ 生成此格'}
+                          </button>
+                          <button
+                            onClick={() => {
+                              const open = panelRewriteTarget?.pageId === pg.id && panelRewriteTarget.index === panel.index;
+                              setPanelRewriteTarget(open ? null : { pageId: pg.id, index: panel.index });
+                              setPanelRewriteDraft('');
+                            }}
+                            className="btn btn--link"
+                            style={{ fontSize: '0.6875rem', padding: 0, marginTop: '0.375rem', marginLeft: '0.625rem' }}
+                          >
+                            改这一格 {panelRewriteTarget?.pageId === pg.id && panelRewriteTarget.index === panel.index ? <ChevronUpIcon className="w-3 h-3" /> : <ChevronDownIcon className="w-3 h-3" />}
+                          </button>
+                          {panelRewriteTarget?.pageId === pg.id && panelRewriteTarget.index === panel.index && (
+                            <div style={{ marginTop: '0.375rem', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                              <input
+                                className="field-input"
+                                value={panelRewriteDraft}
+                                onChange={e => setPanelRewriteDraft(e.target.value)}
+                                onKeyDown={e => {
+                                  if (e.key === 'Enter' && panelRewriteDraft.trim()) {
+                                    void onRewritePanel(pg.id, panel.index, panelRewriteDraft).then(() => setPanelRewriteTarget(null));
+                                  }
+                                }}
+                                placeholder="例如：换成特写 / 让角色微笑"
+                                style={{ fontSize: '0.75rem', padding: '0.25rem 0' }}
+                                autoFocus
+                              />
+                              <button
+                                onClick={() => { void onRewritePanel(pg.id, panel.index, panelRewriteDraft).then(() => setPanelRewriteTarget(null)); }}
+                                disabled={busy || !panelRewriteDraft.trim()}
+                                className="btn btn--primary" style={{ fontSize: '0.6875rem', padding: '0.25rem 0.625rem' }}
+                              >
+                                {busy ? '生成中…' : '应用'}
+                              </button>
+                            </div>
+                          )}
+                          <button
+                            onClick={() => {
+                              const open = panelTextTarget?.pageId === pg.id && panelTextTarget.index === panel.index;
+                              setPanelTextTarget(open ? null : { pageId: pg.id, index: panel.index });
+                            }}
+                            className="btn btn--link"
+                            style={{ fontSize: '0.6875rem', padding: 0, marginTop: '0.25rem', display: 'block' }}
+                          >
+                            ✏️ 改文字 {panelTextTarget?.pageId === pg.id && panelTextTarget.index === panel.index ? <ChevronUpIcon className="w-3 h-3" /> : <ChevronDownIcon className="w-3 h-3" />}
+                          </button>
+                          {panelTextTarget?.pageId === pg.id && panelTextTarget.index === panel.index && (
+                            <div style={{ marginTop: '0.375rem', display: 'flex', flexDirection: 'column', gap: '0.375rem' }}>
+                              {/* —— 2026-09-03：图下方文字三栏（叙述 / 内心独白 / 对白），分别编辑 —— */}
+                              <div>
+                                <div style={{ fontSize: '0.625rem', color: 'var(--ink-3)', marginBottom: '0.125rem' }}>
+                                  📖 叙述（上帝视角 / 场景交代）
+                                </div>
+                                <textarea
+                                  className="field-input"
+                                  value={panelTextDraftNar}
+                                  onChange={e => setPanelTextDraftNar(e.target.value)}
+                                  rows={2}
+                                  placeholder="20-80 字 · 解释在发生什么/为什么/将发生什么"
+                                  style={{ fontSize: '0.75rem', padding: '0.25rem 0', resize: 'vertical' }}
+                                />
+                              </div>
+                              <div>
+                                <div style={{ fontSize: '0.625rem', color: 'var(--ink-3)', marginBottom: '0.125rem' }}>
+                                  💭 内心独白（主角心里的声音）
+                                </div>
+                                <textarea
+                                  className="field-input"
+                                  value={panelTextDraftInner}
+                                  onChange={e => setPanelTextDraftInner(e.target.value)}
+                                  rows={2}
+                                  placeholder="0-50 字 · 选择/迷茫/觉醒的瞬间"
+                                  style={{ fontSize: '0.75rem', padding: '0.25rem 0', resize: 'vertical' }}
+                                />
+                              </div>
+                              <div>
+                                <div style={{ fontSize: '0.625rem', color: 'var(--ink-3)', marginBottom: '0.125rem' }}>
+                                  💬 对白（角色嘴里说出的话）
+                                </div>
+                                <textarea
+                                  className="field-input"
+                                  value={panelTextDraftDlg}
+                                  onChange={e => setPanelTextDraftDlg(e.target.value)}
+                                  rows={2}
+                                  placeholder="≤30 字 · 开头像「角色：...」会被识别为对话"
+                                  style={{ fontSize: '0.75rem', padding: '0.25rem 0', resize: 'vertical' }}
+                                />
+                              </div>
+                              {/* —— AI 重写区（不重出图，只重写文字） —— */}
+                              <div style={{ borderTop: '1px dashed var(--rule-soft)', paddingTop: '0.375rem' }}>
+                                <div style={{ fontSize: '0.625rem', color: 'var(--ink-3)', lineHeight: 1.4, marginBottom: '0.25rem' }}>
+                                  🪄 让 AI 重写文字（不重画图）：
+                                </div>
+                                <textarea
+                                  className="field-input"
+                                  value={panelTextRewriteDraft}
+                                  onChange={e => setPanelTextRewriteDraft(e.target.value)}
+                                  rows={2}
+                                  placeholder="如「加一段上帝叙述说明这是周一早上」「把对白改得更口语」「加点主角内心独白」"
+                                  style={{ fontSize: '0.75rem', padding: '0.25rem 0', resize: 'vertical' }}
+                                />
+                                <button
+                                  onClick={() => { void onRewritePanelText(pg.id, panel.index, panelTextRewriteDraft).then(() => setPanelTextTarget(null)); }}
+                                  disabled={busy || !panelTextRewriteDraft.trim()}
+                                  className="btn btn--primary"
+                                  style={{ fontSize: '0.6875rem', padding: '0.25rem 0.625rem', marginTop: '0.25rem' }}
+                                >
+                                  {busy ? '生成中…' : '🪄 AI 重写文字'}
+                                </button>
+                              </div>
+
+                              <div style={{ display: 'flex', gap: '0.25rem' }}>
+                                <button
+                                  onClick={() => {
+                                    // 2026-09-03：三合一保存 —— 只把"用户实际改过"的字段传上去。
+                                    // 后端把空串视作主动清空（存 undefined，前端不渲染空块）；
+                                    // 缺省（key 不存在）则保留原值不动。这样既保留兼容旧 UI（只改对白），
+                                    // 又能正确识别"用户主动删空"。
+                                    const origDlg = panel.dialogue || '';
+                                    const origNar = panel.narration || '';
+                                    const origInner = panel.innerThought || '';
+                                    const next: { dialogue?: string; narration?: string; innerThought?: string } = {};
+                                    if (panelTextDraftDlg !== origDlg) next.dialogue = panelTextDraftDlg;
+                                    if (panelTextDraftNar !== origNar) next.narration = panelTextDraftNar;
+                                    if (panelTextDraftInner !== origInner) next.innerThought = panelTextDraftInner;
+                                    // 如果用户什么也没改，就别发请求。
+                                    if (Object.keys(next).length === 0) {
+                                      setPanelTextTarget(null);
+                                      return;
+                                    }
+                                    return void onUpdatePanelTextV2(pg.id, panel.index, next).then(() => setPanelTextTarget(null));
+                                  }}
+                                  disabled={busy}
+                                  className="btn btn--primary" style={{ fontSize: '0.6875rem', padding: '0.25rem 0.625rem' }}
+                                >
+                                  保存文字
+                                </button>
+                                <button
+                                  onClick={() => setPanelTextTarget(null)}
+                                  className="btn btn--link" style={{ fontSize: '0.6875rem', padding: '0.25rem 0.5rem' }}
+                                >
+                                  取消
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+                      {/* 保留未展示的原始描述兜底 */}
+                      {!dlg && !panelHasImg && panelState !== 'generating' && (
+                        <div style={{ fontSize: '0.625rem', color: 'var(--ink-3)', marginTop: '0.25rem', lineHeight: 1.4 }}>
+                          {extractReadableText(panel.description).slice(0, 40)}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+
+      {/* —— 底部续写 —— */}
+      {totalPanels > 0 && lastPage && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.625rem', marginTop: '0.25rem', paddingTop: '0.75rem', borderTop: '1px solid var(--rule-soft)' }}>
+          <button onClick={onContinue} disabled={busy} className="btn btn--link" style={{ fontSize: '0.8125rem' }}>
+            <ChevronRightIcon className="w-3.5 h-3.5" />{busy ? '续写中…' : '续写本话（追加一批）'}
+          </button>
+          <span className="kicker" style={{ fontSize: '0.625rem', color: 'var(--ink-3)' }}>
+            基于本话已生成格 + 前文剧情追加 1 批（6 格）；每话目标 12-18 格
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export { EpisodeCard };

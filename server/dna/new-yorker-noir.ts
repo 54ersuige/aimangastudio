@@ -1,4 +1,4 @@
-// @dna-checksum: 800b15eef10b0fb30ff06b389f23ae030de6c7f29904f7b3a6a8330d07584c72
+// @dna-checksum: 16f45435156354ed5fdc45483ba9adef7b5d39638d10741d540e56b6fdfdc0e0
 /**
  * ═══════════════════════════════════════════════════════════════════════════
  *  DNA 预设一：New Yorker × Tomine 都市写实 × Graphic Novel（v1.1）
@@ -23,6 +23,11 @@ Graphic Novel 是 "形"（电影化镜头、留白、一格一帧）。
 整体气质参考 New Yorker 杂志插画、Adrian Tomine 作品、欧美独立 Graphic Novel。
 强调：克制、真实、安静、细腻、留白、生活感、印刷质感。
 画面像一部安静的独立电影，被切成了一组适合手机阅读的漫画镜头。
+
+幽默定位（Style Bible V1.0 融合）：
+New Yorker 式的幽默是"观察型"而非"表演型"——画面平静、可信，
+轻微的荒诞与讽刺藏在情境本身；笑点被读者发现，而不是被宣布。
+像真的生活一样画，像没发生什么一样讲笑话。
 `;
 
 export const VISUAL_KEYWORDS = [
@@ -30,12 +35,14 @@ export const VISUAL_KEYWORDS = [
   '欧美文艺', '独立漫画', 'Graphic Novel', '都市生活',
   '写实但不照片化', '克制', '安静', '内敛', '温和', '微妙',
   '真实', '生活感', '文学感', '电影感', '留白',
+  '观察型幽默', '冷幽默', '轻微荒诞', '编辑部漫画',
   '不煽情', '不说教', '不刻意可爱', '不商业插画化', '不网红漫画化',
   '奶油黄底', '燕麦色', '粉赭红棕点缀', '单幅独立成立',
 ];
 
 export const VISUAL_FORBIDDEN = [
   '动画片', '商业儿童绘本', '网红漫画', '日漫', '二次元',
+  '迪士尼式角色', '皮克斯式3D', '美漫超级英雄', '网络表情包', '萌系',
   'Q版', '大头', '大眼', '夸张五官', '过度精致', '网红脸',
   '明显的动漫脸', '过度年轻化', '完美身材', '塑料质感',
   '高饱和', '荧光色', '糖果色', '强烈渐变', '霓虹色',
@@ -60,18 +67,55 @@ export const IMAGE_NEGATIVE_PROMPT = [
   'glossy skin', 'plastic skin', 'smooth airbrushed skin',
   'speed lines', 'action lines', 'thick cartoon outlines', 'bold outlines',
   'thick lines', 'heavy lines', 'painterly',
+  // 2026-08-31 复盘补充：玻璃幕墙/晨光反射类场景描述会把模型拽进摄影分布，
+  // 原负面表只挡了 3D/CGI，没挡"照片"本身 —— 导致整张输出成实景照片。
+  'photograph', 'photorealistic', 'photography', 'realistic photo', 'photo background',
+  // 角色设定表（2x2 grid）模板词会把模型拽向"设定表训练分布"：
+  // 白底素描 / 水彩写实 / 铅笔淡彩 —— 与 New Yorker 平涂细线直接冲突。
+  'watercolor', 'watercolor painting', 'pencil sketch', 'rough sketch',
+  'faint sketchy lines', 'washed-out pale colors', 'pure white background',
   '3D render', 'CGI', 'game CG',
+  "children's book illustration", 'Disney style', 'Pixar style',
+  'superhero comic',
   'commercial illustration', 'stock illustration style',
   'speech bubbles', 'thought bubbles', 'narrator boxes',
-  'dramatic lighting', 'rim light', 'chiaroscuro',
+  'drama lighting', 'rim light', 'chiaroscuro',
   'perfect body', 'perfect face', 'flawless skin',
   'looking at camera', 'eye contact with viewer',
+  // 2026-09-03 复盘：用户截图显示角色参考图（4 视图参考表）出现「多胳膊」
+  // —— 直接成因是手里拿保温杯的姿态下，文本里没有任何肢体负面约束。
+  // T2I 模型对自然语言"两只手"的描述不敏感，必须用负面词显式排除最常见
+  // 的肢体伪影。注意这些词长度都 ≤15 字符，对 prompt 长度影响极小，
+  // 但命中率显著高于正面的「anatomically correct」短语。
+  'extra arms', 'extra hands', 'extra fingers', 'extra limbs',
+  'third arm', 'third hand', 'fourth arm',
+  'mutated hands', 'bad hands', 'malformed hands',
+  'mutated arms', 'bad arms', 'malformed arms',
+  'too many fingers', 'six fingers', 'seven fingers',
+  'fused fingers', 'missing fingers', 'missing arms',
+  'asymmetric arms', 'wrong hand count', 'duplicate arms',
+  'bad anatomy', 'anatomical errors', 'deformed limbs',
+  'body horror', 'twisted limbs',
+  // 4 视图参考表里曾出现「额外道具」（手杯被误画成多一只手），
+  // 角色图必须保持手空或自然下垂，禁止自带道具：
+  'holding object', 'holding cup', 'holding bottle', 'holding bag',
+  // 平衡姿态：避免转身 3/4 视角容易诱发的手臂叠影
+  'overlapping arms in confusing way',
 ].join(', ');
 
 export const IMAGE_SYSTEM_PROMPT = `
 You are drawing a single panel for an adult literary graphic novel,
 in the tradition of New Yorker spot illustration crossed with
 Adrian Tomine (Shortcomings, Killing and Dying).
+
+[STYLE LOCK — HIGHEST PRIORITY]
+
+Final artwork = clean even ink outlines (one weight, clearly
+visible) + FLAT color fills + at most ONE cel-shadow tone +
+warm cream / oatmeal paper with print grain. If anything below,
+any reference image, or any scene description pulls toward
+watercolor, airbrush gradients, pencil sketch, anime gloss,
+or photorealism, THIS LOCK WINS.
 
 [TONE — NEW YORKER × TOMINE]
 
@@ -84,14 +128,18 @@ brick red. The mood is gentle, slightly autumnal, literary.
 Not melancholy — quiet. The kind of quiet where you can hear
 the air conditioner.
 
+When the scene carries irony or absurdity, play it deadpan:
+every face stays calm, nothing is mugged for the audience.
+The joke is discovered, never announced — like a real
+New Yorker panel.
+
 [LINEWORK]
 
-Pencil-fine black ink lines. As thin as a single hair.
-Same width everywhere — no thick outlines anywhere.
-Lines look printed, not painted. Like a 0.3mm pen drawing.
-NO hatching, NO crosshatching, NO shadow lines, NO painterly.
-The figure is defined by OUTLINE only, with FLAT color fills
-inside (no airbrush shading).
+Like a 0.4mm technical pen printed on paper: one consistent
+line weight, never thick, never faint, never sketchy.
+NO hatching, NO crosshatching, NO rough sketch lines, NO
+airbrush gradients. (Flat fills + single cel shadow are
+defined in the STYLE LOCK above.)
 
 [FACES — MODERN 21st-CENTURY REAL CHINESE]
 
@@ -131,12 +179,13 @@ NOT characters from any animated work.
 [EXPRESSION — restrained, calm, inward]
 
 Neutral. Faces turned three-quarters or in profile.
-Eyes are looking AWAY from camera — out a window, at an object,
-at the table. NOT at the viewer. NOT at the other character.
-Quiet, slight tiredness, slight distance.
-Faces are calm. Eyes are calm. Mouths are closed or slightly
-relaxed. No visible emotion on the face itself — emotion lives
-in the posture and gaze direction.
+NEVER staring straight into the camera. Between characters,
+natural conversation gaze is allowed (two people may look at
+each other, as in Adrian Tomine's dialogue panels), but the
+mood stays quiet and understated. Quiet, slight tiredness,
+slight distance. Faces are calm. Eyes are calm. Mouths are
+closed or slightly relaxed. No visible emotion on the face
+itself — emotion lives in the posture and gaze direction.
 
 [CLOTHING]
 
@@ -155,7 +204,13 @@ warm off-white / cream / oatmeal (NOT cold blue-grey) with
 maybe a small framed picture. Outside a window you might see
 ordinary low-rise buildings or a tree-lined street. Slightly
 worn, lived-in atmosphere. NOT designed, NOT stylish, NOT
-minimalist, NOT artisan, NOT stark.
+stark.
+
+Detail economy: a FEW accurate details beat many details.
+One lit computer, one cold coffee, a few papers, a tired
+person — that already tells the truth of the place. Details
+exist naturally, never stacked to make the picture look
+rich, never crowding out the figures.
 
 [PALETTE — New Yorker spot illustration, warm and printed]
 
@@ -176,23 +231,140 @@ Soft fall-off. No hard shadows. NO rim light, NO HDR,
 NO dramatic chiaroscuro, NO key light, NO cinematic
 backlight glow.
 
-[COMPOSITION]
-
-Cinematic. Medium two-shot, medium shot, or wider.
-Off-center framing. At least 25% of the frame should be wall,
-table, window, or pure negative space — not crowded with detail.
-Empty space is REQUIRED, not optional. Allow the eye to rest.
+(Composition rules are defined in the dedicated COMPOSITION
+section appended after this prompt — cinematic shots,
+off-center framing, narrative whitespace.)
 
 [WHAT THIS IS NOT]
 
-NOT anime. NOT manga. NOT cartoon. NOT illustration.
-NOT commercial art. NOT glossy. NOT cinematic-CG.
-NOT a movie poster. NOT a key visual.
-NOT 3D render. NOT painterly.
+NOT anime. NOT manga. NOT cartoon. NOT glossy.
+NOT commercial art. NOT a movie poster.
 NOT a "beautiful AI illustration".
 
 THIS IS a single quiet frame in a quiet literary comic
 about ordinary people. That is all.
+`;
+
+/**
+ * 角色参考图专用 system prompt（character reference sheet）。
+ *
+ * 与 IMAGE_SYSTEM_PROMPT 的关键差异：
+ *  - 角色图是「白底中性模板」——只画一个角色，不画场景
+ *  - IMAGE_SYSTEM_PROMPT 里 [SCENE — ordinary, lived-in, warm] 段落列举了大量
+ *    咖啡馆、家里、电梯、街道等场景例子，会把场景画到角色图上
+ *  - 本字段只保留 [TONE / LINEWORK / FACES / EXPRESSION / CLOTHING / PALETTE / LIGHTING] 这七个
+ *    跟角色外观相关的段落，**跳过 [SCENE]**，确保角色图是白底中性立绘
+ *  - 风格色调仍然保留（New Yorker 的奶油底色 / 燕麦色 / 0.3mm 钢笔细线 / 暖色调），
+ *    确保角色模板与后续分镜图风格一致
+ */
+export const IMAGE_CHARACTER_SYSTEM_PROMPT = `
+You are drawing a single character portrait for an adult literary
+graphic novel in the tradition of New Yorker spot illustration
+crossed with Adrian Tomine (Shortcomings, Killing and Dying).
+The portrait will be reused as the visual anchor for every page
+the character appears on, so it must be neutral, repeatable, and
+consistent — NOT a moment captured in a location.
+
+[TONE — NEUTRAL PORTRAIT, NOT SCENE]
+
+This is a single character portrait on a neutral background.
+It is NOT a frame from a film. It is NOT set in a cafe, an
+apartment, a street. The character could be from one of those
+films, but here they are presented as themselves, on paper.
+
+[LINEWORK]
+
+Clean, even ink outlines around every figure and object —
+clearly visible, confident, one consistent weight. Never
+thick, never faint, never sketchy. Like a 0.4mm technical
+pen, printed on paper. NO hatching, NO crosshatching, NO
+rough sketch lines. Colors are FLAT fills with at most ONE
+simple cel-shadow tone (a single darker shade on the shadow
+side of walls, furniture, clothing). NO airbrush gradients,
+NO painterly.
+
+[FACES — MODERN 21st-CENTURY REAL CHINESE]
+
+Real modern Chinese faces. Not the "internet celebrity" face,
+not the "anime / manga" face, not the "video game NPC" face.
+The kind of face you would actually see in a Shanghai, Beijing,
+Shenzhen, or Chengdu coffee shop at 4pm on a Tuesday.
+
+Specifically:
+  - Eyes: SMALL, narrow, ALMOND-SHAPED. Not "anime big". Not
+    "Western round". Ordinary Chinese eyes. The whites of the
+    eyes should be barely visible. Single eyelids or shallow
+    double eyelids are both fine. NO eye highlights, NO
+    sparkles, NO enlarged iris, NO lash-line emphasis.
+  - Eyebrows: natural, not shaped, not bold, not thin.
+  - Nose: medium bridge, natural width, ordinary for an East
+    Asian face. NOT a "high Western nose bridge". NOT a flat
+    caricature nose.
+  - Mouth: closed or slightly relaxed. Natural lip color.
+    Not glossy, not painted, not full.
+  - Jaw / face shape: ordinary. Could be round, oval, or
+    slightly square. NOT heart-shaped, NOT "V-line", NOT
+    a sharp chin. NOT a wide caricature jaw either.
+  - Skin: CLEAN, SMOOTH, NATURAL SKIN TONE. Normal Chinese
+    skin color (warm beige to light tan, not porcelain,
+    not yellow). NO visible pores, NO freckles, NO
+    beauty marks. Skin looks like ordinary young-to-middle-
+    aged Chinese skin — healthy, untreated, well-rested.
+  - Hair: modern cut. Could be a bob, shoulder-length, short
+    crop, or short back and sides for men. Natural color
+    (black or very dark brown). Not styled, not dyed.
+
+The face must look like it belongs to an ordinary person you
+might sit next to on the subway. NOT a celebrity. NOT a model.
+NOT a character from any animated work.
+
+[EXPRESSION — restrained, calm, inward]
+
+Neutral. Eyes are looking AWAY from camera — slightly to the
+side, slightly down, slightly past the viewer. NOT direct eye
+contact (direct gaze is reserved for important narrative beats,
+not the default portrait). Quiet, slight tiredness, slight
+distance. Faces are calm. Mouths are closed or slightly relaxed.
+No visible emotion on the face itself — emotion lives in
+posture and gaze direction.
+
+[CLOTHING]
+
+Real contemporary Chinese clothing for the role: cotton t-shirts,
+simple cardigans, plain trousers, jeans, simple shoes. Modern
+fits (not vintage, not oversized, not costume). NO logos. NO
+prints. NO fashion-editor styling. Hair is modern, natural,
+not styled.
+
+[PALETTE — New Yorker spot illustration, warm and printed]
+
+Background: clean cream / oatmeal / warm off-white / paper
+beige (the New Yorker paper tone, NOT pure white, NOT cold
+blue-grey). Skin tones: warm natural beige, light tan (NOT
+porcelain, NOT yellow, NOT grey, NOT olive). Accent colors
+used sparingly: dusty rose, muted brick red, ochre, deep
+teal, navy blue, dark forest green, walnut brown. NEVER neon,
+candy colors, high saturation, fluorescent, magenta, electric
+blue, pure white. The palette should feel like a printed
+magazine page: warm, slightly desaturated, with paper grain.
+
+[LIGHTING]
+
+Natural window light, gentle and diffuse. Soft fall-off.
+No hard shadows. NO rim light, NO HDR, NO dramatic chiaroscuro,
+NO key light, NO cinematic backlight glow.
+
+[WHAT THIS IS NOT]
+
+NOT anime. NOT manga. NOT cartoon. NOT glossy.
+NOT commercial art. NOT a movie poster.
+NOT a "beautiful AI illustration".
+NOT set in any specific location (no cafe, no apartment,
+no street visible in the background).
+
+THIS IS a single character portrait that will be reused as
+the visual anchor for every page the character appears on.
+It is neutral, repeatable, and consistent.
 `;
 
 export const CHARACTER_HARD_CONSTRAINTS = `
@@ -218,8 +390,10 @@ Composition rules (cinematic, not comic-strip):
 - Preferred shot types: wide / long shot, medium shot, two-shot,
   over-the-shoulder, three-quarter view, detail close-up
 - AVOID frontal mug-shot compositions. Slight angles feel more cinematic.
-- Negative space / whitespace is REQUIRED and varies with narrative.
-  A shot can be 30% subject and 70% empty wall, table, or window.
+- Whitespace varies with the narrative beat: some shots are
+  mostly empty wall or window, others are fuller lived-in
+  interiors (bookshelves, a TV wall, a cluttered kitchen).
+  Never crowded to the edges; the composition stays calm.
 - Eyes looking AWAY from camera (off-screen gaze) is preferred over
   looking at camera. Direct eye contact only for important narrative beats.
 - Light comes from a natural source (window, ceiling, lamp) in the scene.
@@ -247,12 +421,15 @@ Scene / environment rules:
 
 export const TEXT_VS_IMAGE_RULES = `
 Text rules:
-- Most dialogue, narration, and inner monologue go OUTSIDE the image,
-  carried by the WeChat article body text, NOT in the image.
-- The image may contain text ONLY when it exists in the real scene:
-  phone screens, street signs, storefronts, book covers, product labels.
+- All dialogue, narration, and inner monologue go OUTSIDE the
+  image, carried by the article body text, NOT in the image.
+- The image contains NO readable text AT ALL: phone screens,
+  signs, storefronts, book covers, labels, documents, posters
+  are BLANK or faintly illegible. Rendered Chinese always comes
+  out garbled — any text in the image is a FAILED output.
 - NEVER add speech bubbles, thought bubbles, or narrator boxes.
-  The image should read like a film still, not a comic panel.
+- The image builds the situation; the caption completes the twist.
+  Never repeat in words what the image already shows.
 `;
 
 export const EXPRESSION_HARD_CONSTRAINTS = `
@@ -299,6 +476,19 @@ Storytelling rules:
 - Dialogue should be sparse, ordinary, real. People do not speak
   in elegant sentences in real life.
 - The story should leave the reader with a question, not a moral.
+
+Observational humour rules (New Yorker register):
+- The joke is discovered, never announced. Build a real, calm,
+  believable scene that contains one visible logical contradiction
+  (e.g. the wall poster says WORK-LIFE BALANCE; the clock says 11:47pm;
+  three cold coffees; everyone perfectly calm).
+- Characters earnestly do unreasonable things. Nobody knows they
+  are funny. No mugging, no reaction shots for the audience.
+- Prefer the contrast between image and caption over any direct joke:
+  the image sets up the situation, one short line completes the turn.
+- Subjects: workplace absurdity, social habits, modern loneliness,
+  quiet self-contradictions of ordinary life. Irony stays warm,
+  never cynical for its own sake, and never preachy.
 `;
 
 export const IMAGE_SELF_CHECK_ITEMS: Array<{ id: string; question: string; failMeans: string }> = [
@@ -315,6 +505,8 @@ export const IMAGE_SELF_CHECK_ITEMS: Array<{ id: string; question: string; failM
   { id: 'no-bubbles', question: '画面里没有对话气泡/旁白框/大段文字？', failMeans: '文字溢出到图里' },
   { id: 'newyorker-feel', question: '整体感觉像"New Yorker 杂志单幅插画"，而不是"AI 漂亮插画"？', failMeans: '太"AI 插画"' },
   { id: 'movie-still', question: '整体感觉像"安静的独立电影一帧"，而非"漫画格"？', failMeans: '太"漫画"' },
+  { id: 'detail-economy', question: '细节是"少量准确"（凉咖啡/亮电脑）而不是堆砌？', failMeans: '细节堆砌' },
+  { id: 'deadpan', question: '若有反讽/荒诞，画面是否全程平静、笑点藏在情境里被发现？', failMeans: '表演型幽默' },
 ];
 
 export const STORYTELLING_TONE_RULES = STORYTELLING_RULES;

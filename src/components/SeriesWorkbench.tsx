@@ -1,13 +1,26 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { useSeries } from '../contexts/SeriesContext';
-import type { SeriesPage, SeriesCharacter, Chapter, Series } from '../types';
+import type { SeriesPage, SeriesCharacter, Chapter, Arc, Series, CharacterGender, CharacterAgeBand } from '../types';
+import { CHARACTER_GENDERS, CHARACTER_AGE_BANDS } from '../types';
 import {
   PlusIcon, RedoAltIcon, ChevronRightIcon, ChevronLeftIcon, ChevronDownIcon, ChevronUpIcon, DownloadIcon, EyeIcon,
 } from './icons';
 import { EmptyState, OnboardingArticles } from './EmptyState';
-import { exportSeriesAsStrips } from '../services/stripExport';
+import { CharacterEditor, ChapterEditor, PanelsEditor, CharacterViewer } from './ManualEditors';
+import { exportSeriesAsEpisodeStrips } from '../services/stripExport';
 import { fetchDnaList } from '../services/modelClient';
 import { DEFAULT_DNA_KEY, type DnaKey, type DnaMeta } from '../services/modelConfig';
+import { CardSection } from './series-workbench/ui';
+import { LoglineCard } from './series-workbench/LoglineCard';
+import { WorldviewCard } from './series-workbench/WorldviewCard';
+import { CharactersCard } from './series-workbench/CharactersCard';
+import { ChaptersCard } from './series-workbench/ChaptersCard';
+import { EpisodePreview } from './EpisodePreview';
+import { useToast } from './Toast';
+import { EpisodesOverview } from './series-workbench/PagesOverview';
+import { EpisodeCard } from './series-workbench/EpisodeCard';
+import { LegacyBanner } from './series-workbench/LegacyBanner';
+import { AuditCard } from './series-workbench/AuditCard';
 
 /**
  * 重构后的主工作台：纵向"编辑稿"卡片流
@@ -19,16 +32,24 @@ import { DEFAULT_DNA_KEY, type DnaKey, type DnaMeta } from '../services/modelCon
  */
 export function SeriesWorkbench() {
   const ctx = useSeries();
+  const toast = useToast();
+  const { updatePanelDialogueInCurrent, updatePanelTextInCurrent, rewritePanelTextInCurrent } = ctx;
   const {
     currentSeries, setCurrentSeriesId, createSeries, seriesList, refreshList,
     step, setStep,
     generateWorldviewForCurrent, generateCharactersForCurrent,
-    addCharacterToCurrent, deleteCharacterFromCurrent, regenerateCharacterImageInCurrent,
+    addCharacterToCurrent, deleteCharacterFromCurrent, regenerateCharacterImageInCurrent, regenerateCharacterShotInCurrent,
+    generateArcsForCurrent, generateArcChaptersForCurrent, appendNextChapterForCurrent,
     generateChaptersForCurrent,
     selectedPageId, setSelectedPageId,
-    breakdownSelectedPage, generateSelectedPage, regenerateSelectedPage,
-    rewriteSelectedPage, rewriteSelectedPanel, continueFromSelectedPage,
-    busy,
+    selectedEpisodeId, setSelectedEpisodeId,
+    breakdownPageInCurrent, generatePageInCurrent, regeneratePageInCurrent,
+    rewritePageInCurrent, rewritePanelInCurrent, continuePageInCurrent, generatePanelInCurrent,
+    updateCharacterInCurrent,
+    updateChapterInCurrent, moveChapterInCurrent, deleteChapterInCurrent,
+    updatePageInCurrent, replacePanelsInCurrent, insertPanelInCurrent, deletePanelInCurrent,
+    refreshCurrent,
+    busy, error, clearError,
   } = ctx;
 
   const [loglineTitle, setLoglineTitle] = useState('');
@@ -36,30 +57,53 @@ export function SeriesWorkbench() {
   const [loglineDnaKey, setLoglineDnaKey] = useState<DnaKey>(DEFAULT_DNA_KEY);
   const [dnaList, setDnaList] = useState<DnaMeta[]>([]);
   const [targetPages, setTargetPages] = useState(12);
-  const [pageInstruction, setPageInstruction] = useState('');
-  const [panelInstrOpen, setPanelInstrOpen] = useState<number | null>(null);
-  const [panelInstruction, setPanelInstruction] = useState('');
   const [newCharOpen, setNewCharOpen] = useState(false);
-  const [newChar, setNewChar] = useState({ name: '', role: 'supporting' as const, description: '', appearance: '' });
+  const [newChar, setNewChar] = useState<{
+    name: string;
+    role: 'protagonist' | 'antagonist' | 'supporting';
+    description: string;
+    appearance: string;
+    roleInStory: string;
+    visualAnchors: string[];
+    // 2026-09-01 新增：手动添加角色时也强制要求性别 / 年龄段，
+    // 这是"图片里男女老少一目了然"的第一道闸门（手动优先于 AI 推断）。
+    gender?: CharacterGender;
+    ageBand?: CharacterAgeBand;
+  }>({
+    name: '', role: 'supporting', description: '', appearance: '', roleInStory: '',
+    visualAnchors: [], gender: undefined, ageBand: undefined,
+  });
 
-  const currentPage = useMemo<SeriesPage | null>(() => {
-    if (!currentSeries || !selectedPageId) return null;
-    for (const ch of currentSeries.chapters) {
-      const p = ch.pages.find(pp => pp.id === selectedPageId);
-      if (p) return p;
+  // 手动编辑弹窗
+  const [editingCharacter, setEditingCharacter] = useState<SeriesCharacter | null>(null);
+  const [viewingCharacter, setViewingCharacter] = useState<SeriesCharacter | null>(null);
+  const [editingChapter, setEditingChapter] = useState<Chapter | null>(null);
+  const [editingPanels, setEditingPanels] = useState<SeriesPage | null>(null);
+  const [previewChapter, setPreviewChapter] = useState<{ ch: Chapter; index: number } | null>(null);
+
+  // 统一遍历：兼容 arcs（新结构）+ chapters（旧结构）
+  const allChapters = useMemo(() => {
+    if (!currentSeries) return [] as Chapter[];
+    if (currentSeries.arcs && currentSeries.arcs.length > 0) {
+      return currentSeries.arcs.flatMap(a => a.chapters);
     }
-    return null;
-  }, [currentSeries, selectedPageId]);
-
-  const allPages = useMemo(() => {
-    if (!currentSeries) return [] as { chapterId: string; chapterTitle: string; page: SeriesPage }[];
-    return currentSeries.chapters.flatMap(ch =>
-      ch.pages.map(p => ({ chapterId: ch.id, chapterTitle: ch.title, page: p }))
-    );
+    return currentSeries.chapters ?? [];
   }, [currentSeries]);
 
-  const currentPageFlatIndex = useMemo(() => allPages.findIndex(x => x.page.id === selectedPageId), [allPages, selectedPageId]);
-  const nextPage = currentPageFlatIndex >= 0 ? allPages[currentPageFlatIndex + 1] : null;
+  const currentChapter = useMemo<Chapter | null>(() => {
+    if (!currentSeries) return null;
+    return allChapters.find(c => c.id === selectedEpisodeId) ?? null;
+  }, [currentSeries, selectedEpisodeId, allChapters]);
+  const currentEpisodeIndex = useMemo(() => allChapters.findIndex(c => c.id === selectedEpisodeId), [allChapters, selectedEpisodeId]);
+
+  // 选话：同步 agent 桥的"当前页"到该话第一批，保证聊天指令有落点
+  const pickEpisode = useCallback((chapterId: string) => {
+    setSelectedEpisodeId(chapterId);
+    const ch = allChapters.find(c => c.id === chapterId);
+    const firstPage = ch?.pages ? [...ch.pages].sort((a, b) => a.pageNumber - b.pageNumber)[0] : undefined;
+    if (firstPage) setSelectedPageId(firstPage.id);
+    setStep('pages');
+  }, [allChapters, setSelectedPageId, setSelectedEpisodeId, setStep]);
 
   const handleCreate = async () => {
     if (!loglineTitle.trim() || !loglineDesc.trim()) return;
@@ -78,26 +122,51 @@ export function SeriesWorkbench() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 顶栏「导出全部」：按话导出（每话一张话级长图，含文案三件套，话号全局连续）
   const handleExportAll = async () => {
     if (!currentSeries) return;
-    const pages = allPages.map(x => x.page);
-    const n = await exportSeriesAsStrips(pages, currentSeries.title);
-    if (n === 0) {
-      alert('暂无可导出的分镜图');
+    try {
+      const n = await exportSeriesAsEpisodeStrips(currentSeries);
+      if (n === 0) {
+        toast.push('暂无可导出的分镜图', 'error');
+      } else {
+        toast.push(`已导出 ${n} 话长图，请到浏览器下载目录查看`, 'success');
+      }
+    } catch (e: any) {
+      toast.push(e.message || '导出失败', 'error');
     }
   };
 
-  const handleRewritePanel = async (panelIndex: number) => {
-    if (!panelInstruction.trim()) return;
-    await rewriteSelectedPanel(panelIndex, panelInstruction);
-    setPanelInstruction('');
-    setPanelInstrOpen(null);
-  };
+  // —— 逐话生成缺图（话级）：逐批增量补齐（后端 generate 只画缺失格，已有图不动）
+  const handleGenerateAllMissing = useCallback(async () => {
+    if (!currentChapter) return;
+    const pages = [...currentChapter.pages].sort((a, b) => a.pageNumber - b.pageNumber);
+    for (const pg of pages) {
+      if (pg.panels.length === 0 || pg.panels.every(pn => pn.imageUrl)) continue;
+      const r = await generatePageInCurrent(pg.id);
+      if (!r) break; // 出错即停，保留已生成部分
+    }
+  }, [currentChapter, generatePageInCurrent]);
+
+  // 角色详情弹窗里的「重生成 sheet」按钮
+  const handleRegenShot = useCallback(async (c: SeriesCharacter, shot: 'sheet') => {
+    if (!c) return;
+    await regenerateCharacterShotInCurrent(c.id, shot);
+  }, [regenerateCharacterShotInCurrent]);
 
   const handleAddCharacter = async () => {
     if (!newChar.name || !newChar.description || !newChar.appearance) return;
-    await addCharacterToCurrent({ ...newChar, autoGenerateImage: true });
-    setNewChar({ name: '', role: 'supporting', description: '', appearance: '' });
+    await addCharacterToCurrent({
+      ...newChar,
+      visualAnchors: newChar.visualAnchors,
+      gender: newChar.gender,
+      ageBand: newChar.ageBand,
+      autoGenerateImage: true,
+    });
+    setNewChar({
+      name: '', role: 'supporting', description: '', appearance: '', roleInStory: '',
+      visualAnchors: [], gender: undefined, ageBand: undefined,
+    });
     setNewCharOpen(false);
   };
 
@@ -113,8 +182,13 @@ export function SeriesWorkbench() {
               <div style={{ fontSize: '0.8125rem', color: 'var(--ink-3)' }}>还没有连载 · 在下面新建一个</div>
             )}
             {seriesList.map(s => {
-              const totalPages = s.chapters.reduce((sum, c) => sum + c.pages.length, 0);
-              const donePages = s.chapters.reduce((sum, c) => sum + c.pages.filter(p => p.status === 'done').length, 0);
+              // 兼容 arcs（新结构）+ chapters（旧结构）；旧 series 通过启动迁移应该都已经迁移，
+              // 但前端在迁移完成前的瞬间仍可能看到旧形态，所以这里取兼容写法。
+              const flatChapters = s.arcs && s.arcs.length > 0
+                ? s.arcs.flatMap(a => a.chapters)
+                : (s.chapters ?? []);
+              const totalPages = flatChapters.reduce((sum, c) => sum + c.pages.length, 0);
+              const donePages = flatChapters.reduce((sum, c) => sum + c.pages.filter(p => p.status === 'done').length, 0);
               return (
                 <button
                   key={s.id}
@@ -128,7 +202,7 @@ export function SeriesWorkbench() {
                 >
                   <div style={{ fontWeight: 600, fontSize: '0.875rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.title || '（未命名）'}</div>
                   <div style={{ fontSize: '0.625rem', color: 'var(--ink-3)', marginTop: '0.125rem' }}>
-                    {s.chapters.length} 章 · {donePages}/{totalPages} 页
+                    {flatChapters.length} 章 · {donePages}/{totalPages} 页
                   </div>
                 </button>
               );
@@ -226,11 +300,31 @@ export function SeriesWorkbench() {
   // 决定每张卡的"状态"
   const wStatus = !currentSeries.worldview ? 'pending' : 'done';
   const cStatus = currentSeries.characters.length === 0 ? 'pending' : 'done';
-  const chStatus = currentSeries.chapters.length === 0 ? 'pending' : 'done';
-  const pStatus = allPages.length === 0 ? 'pending' : allPages.every(p => p.page.status === 'done') ? 'done' : 'in_progress';
+  // 季蓝图/季骨架已就绪但还没拆出任何话 —— 不是"未开始"，是"待拆话目"
+  const structureReady = (currentSeries.worldview?.arcBlueprints?.length ?? 0) > 0 || (currentSeries.arcs?.length ?? 0) > 0;
+  const ivStatus: 'pending' | 'in_progress' | 'done' = allChapters.length > 0
+    ? (allChapters.every(ch => ch.pages.every(p => p.panels.every(pn => !!pn.imageUrl))) ? 'done' : 'in_progress')
+    : structureReady ? 'in_progress' : 'pending';
+  const pStatus = allChapters.length === 0 ? 'pending'
+    : allChapters.every(ch => ch.pages.every(p => p.panels.every(pn => !!pn.imageUrl))) ? 'done' : 'in_progress';
 
   return (
     <div style={{ padding: '2rem 2.5rem 4rem', maxWidth: '60rem', margin: '0 auto' }}>
+      {/* —— 错误提示 —— */}
+      {error && (
+        <div style={{
+          background: '#FBEAE8', border: '1px solid #E3B0AB', borderLeft: '4px solid #B0413E',
+          color: '#5B1F1B', padding: '0.75rem 1rem', marginBottom: '1rem', borderRadius: '4px',
+          display: 'flex', alignItems: 'flex-start', gap: '0.625rem',
+        }}>
+          <span style={{ flexShrink: 0, fontSize: '1rem' }}>⚠</span>
+          <div style={{ flex: 1, fontSize: '0.875rem', lineHeight: 1.5 }}>
+            <strong style={{ display: 'block', marginBottom: '0.125rem' }}>操作失败</strong>
+            <span style={{ whiteSpace: 'pre-wrap' }}>{error}</span>
+          </div>
+          <button onClick={clearError} className="btn btn--link" style={{ flexShrink: 0, color: '#5B1F1B' }}>✕</button>
+        </div>
+      )}
       {/* —— 顶：项目"封面页" —— */}
       <header style={{ marginBottom: '2rem', borderBottom: '1px solid var(--rule)', paddingBottom: '1.5rem' }}>
         <div className="kicker kicker--accent">本期连载</div>
@@ -241,7 +335,7 @@ export function SeriesWorkbench() {
           </p>
         )}
         <div style={{ display: 'flex', gap: '0.625rem', marginTop: '1rem', alignItems: 'center' }}>
-          {currentSeries.chapters.length > 0 && (
+          {allChapters.length > 0 && (
             <button onClick={handleExportAll} className="btn btn--ghost" style={{ fontSize: '0.75rem', padding: '0.5rem 0.875rem' }}>
               <DownloadIcon className="w-3.5 h-3.5" />导出全部
             </button>
@@ -251,6 +345,15 @@ export function SeriesWorkbench() {
           </button>
         </div>
       </header>
+
+      {/* 2026-09-07 反馈层 P3：legacy 角色红条（缺必填字段时显示）。 */}
+      <LegacyBanner
+        onJump={(sid) => {
+          // 跳到对应 series —— 若当前就是该 series，则不切；否则切换。
+          if (currentSeries?.id !== sid) setCurrentSeriesId(sid);
+          toast.push('已切换到对应 series，去角色卡补全字段', 'default');
+        }}
+      />
 
       {/* —— Card I · 灵感（项目元数据，可改） —— */}
       <CardSection
@@ -292,66 +395,82 @@ export function SeriesWorkbench() {
           onAddChar={() => setNewCharOpen(true)}
           onDeleteChar={deleteCharacterFromCurrent}
           onRegenCharImg={regenerateCharacterImageInCurrent}
+          onRegenCharShot={regenerateCharacterShotInCurrent}
+          onEdit={(c) => setEditingCharacter(c)}
+          onView={(c) => setViewingCharacter(c)}
           busy={busy}
         />
       </CardSection>
 
-      {/* —— Card IV · 章节 —— */}
+      {/* —— Card IV · 季与话目 —— */}
       <CardSection
         index="IV"
-        kicker="章节大纲"
-        status={chStatus}
+        kicker="季 · 话目"
+        status={ivStatus}
         active={step === 'chapters'}
-        title={currentSeries.chapters.length > 0 ? `${currentSeries.chapters.length} 章 / ${allPages.length} 页` : '拆分章节'}
+        title={currentSeries.arcs && currentSeries.arcs.length > 0
+            ? `${currentSeries.arcs.length} 季 · ${allChapters.length} 话`
+            : allChapters.length > 0
+              ? `${allChapters.length} 话`
+              : structureReady ? '季蓝图已就绪，待拆话目' : '拆分连载结构'}
       >
         <ChaptersCard
           series={currentSeries}
           targetPages={targetPages}
           setTargetPages={setTargetPages}
           onGenerate={generateChaptersForCurrent}
-          onPickPage={(id) => { setSelectedPageId(id); setStep('pages'); }}
+          onGenerateArcs={generateArcsForCurrent}
+          onGenerateArcChapters={generateArcChaptersForCurrent}
+          onAppendNextChapter={appendNextChapterForCurrent}
+          onPickEpisode={pickEpisode}
+          onEditChapter={(ch) => setEditingChapter(ch)}
+          onPreviewChapter={(ch, index) => setPreviewChapter({ ch, index })}
           busy={busy}
         />
       </CardSection>
 
-      {/* —— Card V · 逐页 —— */}
+      {/* —— Card V · 逐话 —— */}
       <CardSection
         index="V"
-        kicker="逐页生成"
+        kicker="逐话生成"
         status={pStatus}
         active={step === 'pages'}
-        title={currentPage ? currentPage.title : '逐页生成分镜'}
+        title={currentChapter && currentEpisodeIndex >= 0 ? `第 ${currentEpisodeIndex + 1} 话《${currentChapter.title}》` : '逐话生成分镜'}
       >
-        {currentPage ? (
-          <PageCard
+        {currentChapter && currentEpisodeIndex >= 0 ? (
+          <EpisodeCard
             series={currentSeries}
-            page={currentPage}
-            allPages={allPages}
-            currentIndex={currentPageFlatIndex}
-            onPrev={() => currentPageFlatIndex > 0 && setSelectedPageId(allPages[currentPageFlatIndex - 1].page.id)}
-            onNext={() => nextPage && setSelectedPageId(nextPage.page.id)}
-            onBreakdown={breakdownSelectedPage}
-            onGenerate={generateSelectedPage}
-            onRegenerate={regenerateSelectedPage}
-            onRewritePage={async () => {
-              if (!pageInstruction.trim()) return;
-              await rewriteSelectedPage(pageInstruction);
-              setPageInstruction('');
-            }}
-            pageInstruction={pageInstruction}
-            setPageInstruction={setPageInstruction}
-            onRewritePanel={handleRewritePanel}
-            panelInstrOpen={panelInstrOpen}
-            setPanelInstrOpen={setPanelInstrOpen}
-            panelInstruction={panelInstruction}
-            setPanelInstruction={setPanelInstruction}
-            onContinue={continueFromSelectedPage}
+            chapter={currentChapter}
+            episodeIndex={currentEpisodeIndex + 1}
+            episodeCount={allChapters.length}
+            onPrev={() => { if (currentEpisodeIndex > 0) pickEpisode(allChapters[currentEpisodeIndex - 1].id); }}
+            onNext={() => { if (currentEpisodeIndex < allChapters.length - 1) pickEpisode(allChapters[currentEpisodeIndex + 1].id); }}
             busy={busy}
+            onBreakdownBatch={async (pageId) => { await breakdownPageInCurrent(pageId); }}
+            onGenerateBatch={async (pageId) => { await generatePageInCurrent(pageId); }}
+            onRegenerateBatch={async (pageId) => { await regeneratePageInCurrent(pageId); }}
+            onRewriteBatch={async (pageId, instruction) => { await rewritePageInCurrent(pageId, instruction); }}
+            onEditBatch={(pg) => setEditingPanels(pg)}
+            onGenerateAllMissing={handleGenerateAllMissing}
+            onContinue={async () => {
+              const pages = [...currentChapter.pages].sort((a, b) => a.pageNumber - b.pageNumber);
+              const last = pages[pages.length - 1];
+              if (last) await continuePageInCurrent(last.id);
+            }}
+            onPreview={() => setPreviewChapter({ ch: currentChapter, index: currentEpisodeIndex + 1 })}
+            onGeneratePanel={async (pageId, panelIndex) => { await generatePanelInCurrent(pageId, panelIndex); }}
+            onRewritePanel={async (pageId, panelIndex, instruction) => { await rewritePanelInCurrent(pageId, panelIndex, instruction); }}
+            onUpdatePanelText={async (pageId, idx, dialogue) => { await updatePanelDialogueInCurrent(pageId, idx, dialogue); }}
+            onUpdatePanelTextV2={async (pageId, idx, text) => { await updatePanelTextInCurrent(pageId, idx, text); }}
+            onRewritePanelText={async (pageId, idx, instruction) => { await rewritePanelTextInCurrent(pageId, idx, instruction); }}
           />
         ) : (
-          <PagesOverview series={currentSeries} onPickPage={(id) => { setSelectedPageId(id); setStep('pages'); }} />
+          <EpisodesOverview series={currentSeries} onPickEpisode={pickEpisode} />
         )}
       </CardSection>
+
+      {/* 2026-09-07 反馈层 P3：审计卡片 —— driftScore + 最近不达标记录 */}
+      <AuditCard seriesId={currentSeries?.id} />
 
       {/* —— 新增角色弹窗 —— */}
       {newCharOpen && (
@@ -372,13 +491,57 @@ export function SeriesWorkbench() {
                   <option value="supporting">配角</option>
                 </select>
               </div>
+              {/* —— 2026-09-01 新增：性别 / 年龄段下拉（手动优先于 AI 推断）。
+                  如果不填，AI 偶尔会把"短发瘦小女生"画成中性偏男生面孔。 */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+                <div>
+                  <label className="field-label">性别</label>
+                  <select
+                    className="field-input"
+                    value={newChar.gender ?? ''}
+                    onChange={e => setNewChar({ ...newChar, gender: (e.target.value || undefined) as CharacterGender | undefined })}
+                  >
+                    <option value="">（未指定 — 让 AI 推断）</option>
+                    <option value="female">女</option>
+                    <option value="male">男</option>
+                    <option value="ambiguous">中性（性别模糊）</option>
+                    <option value="nonbinary">非二元</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="field-label">年龄段</label>
+                  <select
+                    className="field-input"
+                    value={newChar.ageBand ?? ''}
+                    onChange={e => setNewChar({ ...newChar, ageBand: (e.target.value || undefined) as CharacterAgeBand | undefined })}
+                  >
+                    <option value="">（未指定 — 让 AI 推断）</option>
+                      <option value="child">儿童 (&lt;13)</option>
+                      <option value="teen">青少年 (13-19)</option>
+                      <option value="young_adult">青年 (20-34)</option>
+                      <option value="middle_aged">中年 (35-54)</option>
+                      <option value="elderly">老年 (≥55)</option>
+                  </select>
+                </div>
+              </div>
               <div>
                 <label className="field-label">背景/性格</label>
                 <textarea className="field-textarea" value={newChar.description} onChange={e => setNewChar({ ...newChar, description: e.target.value })} rows={2} placeholder="1-2 句" />
               </div>
               <div>
                 <label className="field-label">外貌</label>
-                <textarea className="field-textarea" value={newChar.appearance} onChange={e => setNewChar({ ...newChar, appearance: e.target.value })} rows={3} placeholder="用于 AI 生图，2-3 句" />
+                <textarea className="field-textarea" value={newChar.appearance} onChange={e => setNewChar({ ...newChar, appearance: e.target.value })} rows={3} placeholder="用于 AI 生图，按「体型→发型→脸→眼睛→服装」顺序写，3-5 句" />
+              </div>
+              <div>
+                <label className="field-label">故事内定位（可选）</label>
+                <input className="field-input" value={newChar.roleInStory} onChange={e => setNewChar({ ...newChar, roleInStory: e.target.value })} placeholder="例：主角的职场导师" />
+              </div>
+              <div>
+                <label className="field-label">视觉锚点（逗号分隔，3-6 条）</label>
+                <input className="field-input" value={newChar.visualAnchors.join('、')} onChange={e => setNewChar({ ...newChar, visualAnchors: e.target.value.split(/[、,,]/).map(s => s.trim()).filter(Boolean) })} placeholder="例：黑色短发, 左眼下痣, 银色项链" />
+                <p className="kicker" style={{ fontSize: '0.625rem', marginTop: '0.25rem', color: 'var(--ink-3)' }}>
+                  这些高辨识度特征会被强制带入每一格分镜。
+                </p>
               </div>
             </div>
             <hr className="rule" />
@@ -389,503 +552,82 @@ export function SeriesWorkbench() {
           </div>
         </div>
       )}
-    </div>
-  );
-}
 
-/* ============================================================
- * 卡片框架（kicker + 标题 + 状态徽章 + 活跃红条）
- * ============================================================ */
-
-type CardStatus = 'pending' | 'in_progress' | 'done';
-
-function CardSection({
-  index, kicker, status, title, active, children,
-}: {
-  index: string;
-  kicker: string;
-  status: CardStatus;
-  title: string;
-  active?: boolean;
-  children: React.ReactNode;
-}): React.ReactElement {
-  const badge =
-    status === 'done'
-      ? { text: '已完成', color: 'var(--ink-2)', bg: 'var(--bg-soft)' }
-      : status === 'in_progress'
-      ? { text: '进行中', color: 'var(--paper)', bg: 'var(--accent)' }
-      : { text: '未开始', color: 'var(--ink-3)', bg: 'transparent' };
-
-  return (
-    <section
-      className={`card fade-in ${active ? 'card--active' : ''}`}
-      style={{
-        padding: '1.5rem 1.75rem',
-        marginBottom: '1.5rem',
-        background: active ? '#FFFCF3' : 'var(--bg-card)',
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: '1rem', marginBottom: '1rem', borderBottom: '1px solid var(--rule-soft)', paddingBottom: '0.75rem' }}>
-        <span className="chapter-num" style={{ fontSize: '1.75rem' }}>§ {index}</span>
-        <div style={{ flex: 1 }}>
-          <div className="kicker kicker--accent">{kicker}</div>
-          <h2 className="headline headline--lg" style={{ marginTop: '0.125rem' }}>{title}</h2>
-        </div>
-        <span style={{
-          fontSize: '0.625rem', letterSpacing: '0.18em', textTransform: 'uppercase',
-          color: badge.color, background: badge.bg,
-          padding: '0.25rem 0.625rem',
-          border: status === 'pending' ? '1px solid var(--rule-soft)' : 'none',
-        }}>
-          {badge.text}
-        </span>
-      </div>
-      <div>{children}</div>
-    </section>
-  );
-}
-
-/* ============================================================
- * 各卡片内容
- * ============================================================ */
-
-function LoglineCard({ series, dnaList = [] }: { series: Series; dnaList?: DnaMeta[] }) {
-  // series.dnaKey 在创建时被冻结；找不到 metadata 时回退到 key 字符串，避免「未加载 DNA 元数据」时显示空白。
-  const dnaMeta = dnaList.find(d => d.key === series.dnaKey);
-  return (
-    <div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
-        <div>
-          <div className="kicker">故事简介</div>
-          <p style={{ fontSize: '1rem', lineHeight: 1.6, color: 'var(--ink)', marginTop: '0.5rem' }}>{series.logline}</p>
-        </div>
-        <div>
-          <div className="kicker">画风 DNA（创建后不可更改）</div>
-          {dnaMeta ? (
-            <>
-              <p style={{ fontSize: '0.9375rem', fontWeight: 600, color: 'var(--ink)', marginTop: '0.5rem' }}>{dnaMeta.name}</p>
-              <p style={{ fontSize: '0.8125rem', color: 'var(--ink-2)', lineHeight: 1.4, marginTop: '0.25rem' }}>{dnaMeta.tagline}</p>
-            </>
-          ) : (
-            <p style={{ fontSize: '0.9375rem', color: 'var(--ink-2)', marginTop: '0.5rem' }}>{series.dnaKey || '（加载中…）'}</p>
-          )}
-        </div>
-      </div>
-      <hr className="rule-soft" />
-      <div className="kicker">这些信息是后续每一步 AI 生成的依据，可在聊天中修改（画风除外）。</div>
-    </div>
-  );
-}
-
-function WorldviewCard({ series, onGenerate, busy }: { series: Series; onGenerate: () => void; busy: boolean }) {
-  if (!series.worldview) {
-    return (
-      <div>
-        <p className="deck" style={{ marginBottom: '1rem' }}>AI 会根据你的简介设定时代、背景、画风、色调。</p>
-        <button onClick={onGenerate} disabled={busy} className="btn btn--primary">
-          {busy ? '生成中…' : '生成世界观 ▸'}
-        </button>
-      </div>
-    );
-  }
-  const w = series.worldview;
-  return (
-    <div>
-      <p className="italic-serif" style={{ fontSize: '1.125rem', color: 'var(--ink-2)', marginBottom: '1rem' }}>
-        {w.summary}
-      </p>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.625rem', marginBottom: '1rem' }}>
-        <InfoChip label="时代" value={w.era} />
-        <InfoChip label="画风" value={w.artStyle} />
-        <InfoChip label="色调" value={w.paletteMood} />
-      </div>
-      <details>
-        <summary className="kicker" style={{ cursor: 'pointer' }}>展开背景设定 ▾</summary>
-        <div style={{ marginTop: '0.75rem', fontSize: '0.9375rem', lineHeight: 1.7, whiteSpace: 'pre-wrap', color: 'var(--ink-2)' }}>{w.background}</div>
-      </details>
-      <hr className="rule-soft" />
-      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-        <button onClick={onGenerate} disabled={busy} className="btn btn--link" style={{ fontSize: '0.8125rem' }}>
-          <RedoAltIcon className="w-3.5 h-3.5" />重新生成
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function InfoChip({ label, value }: { label: string; value: string }) {
-  return (
-    <div style={{ background: 'var(--bg-soft)', padding: '0.625rem 0.75rem' }}>
-      <div className="kicker" style={{ fontSize: '0.5625rem' }}>{label}</div>
-      <div style={{ fontSize: '0.8125rem', fontWeight: 600, lineHeight: 1.35, marginTop: '0.25rem' }}>{value}</div>
-    </div>
-  );
-}
-
-function CharactersCard({
-  series, onGenerate, onAddChar, onDeleteChar, onRegenCharImg, busy,
-}: {
-  series: Series;
-  onGenerate: () => void;
-  onAddChar: () => void;
-  onDeleteChar: (id: string) => void | Promise<void>;
-  onRegenCharImg: (id: string) => void | Promise<void>;
-  busy: boolean;
-}) {
-  if (series.characters.length === 0) {
-    return (
-      <div>
-        <p className="deck" style={{ marginBottom: '1rem' }}>AI 会创建 3-4 位角色并各自生成一张参考图；之后每页画到这个角色都会用这张图保持一致。</p>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
-          <button onClick={onGenerate} disabled={busy} className="btn btn--primary">
-            {busy ? '生成中…' : '自动生成 3-4 个角色 ▸'}
-          </button>
-          <button onClick={onAddChar} className="btn btn--ghost">手动添加</button>
-        </div>
-      </div>
-    );
-  }
-  const roleLabel = (r: string) => r === 'protagonist' ? '主角' : r === 'antagonist' ? '反派' : '配角';
-  return (
-    <div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(11rem, 1fr))', gap: '1rem' }}>
-        {series.characters.map(c => (
-          <div key={c.id} style={{ background: 'var(--bg-soft)' }}>
-            <div style={{ aspectRatio: '1 / 1', background: 'var(--bg-paper-2)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
-              {c.referenceImage ? (
-                <img src={c.referenceImage} alt={c.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-              ) : (
-                <span style={{ fontSize: '0.6875rem', color: 'var(--ink-3)' }}>暂无参考图</span>
-              )}
-            </div>
-            <div style={{ padding: '0.625rem 0.75rem' }}>
-              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
-                <span style={{ fontWeight: 600, fontSize: '0.9375rem' }}>{c.name}</span>
-                <span className="kicker" style={{ fontSize: '0.5625rem', color: c.role === 'protagonist' ? 'var(--accent)' : 'var(--ink-3)' }}>
-                  {roleLabel(c.role)}
-                </span>
-              </div>
-              <p style={{ fontSize: '0.6875rem', color: 'var(--ink-2)', marginTop: '0.375rem', lineHeight: 1.4, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{c.description}</p>
-              <div style={{ display: 'flex', gap: '0.25rem', marginTop: '0.5rem' }}>
-                <button onClick={() => onRegenCharImg(c.id)} disabled={busy} className="btn btn--link" style={{ fontSize: '0.6875rem', padding: 0 }}>重生成图</button>
-                <span style={{ flex: 1 }} />
-                <button onClick={() => onDeleteChar(c.id)} className="btn btn--link" style={{ fontSize: '0.6875rem', padding: 0, color: 'var(--danger)' }}>删除</button>
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-      <hr className="rule-soft" />
-      <div style={{ display: 'flex', gap: '0.5rem' }}>
-        <button onClick={onGenerate} disabled={busy} className="btn btn--link" style={{ fontSize: '0.8125rem' }}>
-          <RedoAltIcon className="w-3.5 h-3.5" />{busy ? '生成中…' : '重新生成全部'}
-        </button>
-        <span style={{ flex: 1 }} />
-        <button onClick={onAddChar} className="btn btn--ghost" style={{ fontSize: '0.8125rem' }}>
-          <PlusIcon className="w-3.5 h-3.5" />手动添加
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function ChaptersCard({
-  series, targetPages, setTargetPages, onGenerate, onPickPage, busy,
-}: {
-  series: Series;
-  targetPages: number;
-  setTargetPages: (n: number) => void;
-  onGenerate: (target: number) => Promise<Chapter[] | null>;
-  onPickPage: (id: string) => void;
-  busy: boolean;
-}) {
-  if (series.chapters.length === 0) {
-    return (
-      <div>
-        <p className="deck" style={{ marginBottom: '1rem' }}>告诉 AI 你总共想要多少页（推荐 8-20 页），它会自动拆分成章节。</p>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.625rem', marginBottom: '1rem' }}>
-          <label className="field-label" style={{ marginBottom: 0 }}>目标总页数</label>
-          <input
-            type="number" min={4} max={60} value={targetPages}
-            onChange={e => setTargetPages(Number(e.target.value))}
-            style={{
-              width: '5rem', padding: '0.375rem 0.5rem',
-              border: '1px solid var(--rule-soft)', fontSize: '0.875rem',
-              fontFamily: 'var(--font-mono)', textAlign: 'center',
-            }}
+      {/* —— 手动编辑弹窗 —— */}
+      <CharacterViewer
+        open={!!viewingCharacter}
+        character={viewingCharacter}
+        onClose={() => setViewingCharacter(null)}
+        onEdit={(c) => setEditingCharacter(c)}
+        onRegenShot={handleRegenShot}
+      />
+      <CharacterEditor
+        open={!!editingCharacter}
+        character={editingCharacter}
+        onClose={() => setEditingCharacter(null)}
+        onSave={async (patch) => {
+          if (!editingCharacter) return;
+          await updateCharacterInCurrent(editingCharacter.id, patch);
+        }}
+      />
+      <ChapterEditor
+        open={!!editingChapter}
+        chapter={editingChapter}
+        siblings={allChapters.map(c => ({ id: c.id, title: c.title }))}
+        onClose={() => setEditingChapter(null)}
+        onSave={async (patch) => {
+          if (!editingChapter) return;
+          await updateChapterInCurrent(editingChapter.id, patch);
+        }}
+        onDelete={editingChapter ? async () => {
+          // 二次确认由 ChapterEditor 内的两步按钮（删除章节 → 确认删除）承担，不再叠加原生 confirm
+          await deleteChapterInCurrent(editingChapter.id);
+        } : undefined}
+        onMove={editingChapter ? async (dir) => {
+          await moveChapterInCurrent(editingChapter.id, dir);
+        } : undefined}
+      />
+      <PanelsEditor
+        open={!!editingPanels}
+        page={editingPanels}
+        onClose={() => setEditingPanels(null)}
+        onSavePanels={async (panels) => {
+          if (!editingPanels) return;
+          await replacePanelsInCurrent(editingPanels.id, panels);
+        }}
+        onInsertPanel={async (at) => {
+          if (!editingPanels) return;
+          await insertPanelInCurrent(editingPanels.id, at);
+          // 重新打开时拉最新 page
+          const fresh = currentSeries && (currentSeries.arcs?.flatMap(a => a.chapters).flatMap(c => c.pages).find(p => p.id === editingPanels.id));
+          if (fresh) setEditingPanels(fresh);
+        }}
+        onDeletePanel={async (panelId) => {
+          if (!editingPanels) return;
+          await deletePanelInCurrent(editingPanels.id, panelId);
+          const fresh = currentSeries && (currentSeries.arcs?.flatMap(a => a.chapters).flatMap(c => c.pages).find(p => p.id === editingPanels.id));
+          if (fresh) setEditingPanels(fresh);
+        }}
+      />
+      {previewChapter && currentSeries && (() => {
+        // 预览期间用最新章数据（保存文案/刷新后保持同步）；话号全局连续（跨章）
+        const live = allChapters.find(c => c.id === previewChapter.ch.id) ?? previewChapter.ch;
+        const idx = allChapters.findIndex(c => c.id === live.id);
+        const chapterIndex = idx >= 0 ? idx + 1 : previewChapter.index;
+        const prevTitle = idx > 0 ? allChapters[idx - 1]?.title : undefined;
+        return (
+          <EpisodePreview
+            series={currentSeries}
+            chapter={live}
+            chapterIndex={chapterIndex}
+            prevChapterTitle={prevTitle}
+            isLast={idx === allChapters.length - 1}
+            onClose={() => setPreviewChapter(null)}
+            onChanged={() => { void refreshCurrent(); }}
           />
-        </div>
-        <button onClick={() => onGenerate(targetPages)} disabled={busy} className="btn btn--primary">
-          {busy ? '拆分中…' : '生成章节 ▸'}
-        </button>
-      </div>
-    );
-  }
-  return (
-    <div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.875rem' }}>
-        {series.chapters.map((ch: Chapter, i: number) => (
-          <div key={ch.id} style={{ background: 'var(--bg-soft)', padding: '1rem 1.25rem' }}>
-            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-              <h3 style={{ fontFamily: 'var(--font-display)', fontSize: '1.0625rem', fontWeight: 600 }}>
-                <span className="chapter-num" style={{ fontSize: '1rem', marginRight: '0.375rem' }}>§{toRoman(i + 1)}</span>
-                {ch.title}
-              </h3>
-              <span className="mono" style={{ fontSize: '0.6875rem', color: 'var(--ink-3)' }}>{ch.pages.length} 页</span>
-            </div>
-            <p style={{ fontSize: '0.8125rem', color: 'var(--ink-2)', lineHeight: 1.55, marginBottom: '0.75rem' }}>{ch.summary}</p>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(2.25rem, 1fr))', gap: '0.375rem', maxWidth: '24rem' }}>
-              {ch.pages.map(p => {
-                const firstImg = p.panels.find(pn => pn.imageUrl)?.imageUrl;
-                return (
-                  <button
-                    key={p.id}
-                    onClick={() => onPickPage(p.id)}
-                    className="panel-thumb"
-                    style={{
-                      aspectRatio: '3 / 4',
-                      border: '1px solid var(--rule-soft)',
-                      cursor: 'pointer',
-                      background: firstImg ? 'transparent' : 'var(--bg-paper-2)',
-                    }}
-                    title={p.title}
-                  >
-                    {firstImg ? (
-                      <img src={firstImg} alt="" />
-                    ) : (
-                      <span style={{ color: p.status === 'done' ? 'var(--accent)' : 'var(--ink-3)' }}>
-                        {p.pageNumber}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        ))}
-      </div>
-      <hr className="rule-soft" />
-      <div style={{ display: 'flex', alignItems: 'center', gap: '0.625rem' }}>
-        <button onClick={() => onGenerate(targetPages)} disabled={busy} className="btn btn--link" style={{ fontSize: '0.8125rem' }}>
-          <RedoAltIcon className="w-3.5 h-3.5" />{busy ? '生成中…' : '重新拆分'}
-        </button>
-        <label className="kicker" style={{ fontSize: '0.625rem', color: 'var(--ink-3)' }}>目标 {targetPages} 页</label>
-      </div>
+        );
+      })()}
     </div>
   );
 }
 
-function PagesOverview({ series, onPickPage }: { series: Series; onPickPage: (id: string) => void }) {
-  return (
-    <div>
-      <p className="deck" style={{ marginBottom: '1rem' }}>请从上方「章节大纲」里点击任一页开始。</p>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(8rem, 1fr))', gap: '0.625rem' }}>
-        {series.chapters.flatMap(ch => ch.pages.map(p => {
-          const firstImg = p.panels.find(pn => pn.imageUrl)?.imageUrl;
-          return (
-            <button key={p.id} onClick={() => onPickPage(p.id)} className="panel-thumb" style={{ aspectRatio: '3 / 4', cursor: 'pointer' }}>
-              {firstImg ? <img src={firstImg} alt="" /> : <span>{p.pageNumber}</span>}
-            </button>
-          );
-        }))}
-      </div>
-    </div>
-  );
-}
-
-function PageCard(props: {
-  series: Series;
-  page: SeriesPage;
-  allPages: { chapterId: string; chapterTitle: string; page: SeriesPage }[];
-  currentIndex: number;
-  onPrev: () => void;
-  onNext: () => void;
-  onBreakdown: () => Promise<SeriesPage | null>;
-  onGenerate: () => Promise<SeriesPage | null>;
-  onRegenerate: () => Promise<SeriesPage | null>;
-  onRewritePage: () => Promise<void>;
-  pageInstruction: string;
-  setPageInstruction: (v: string) => void;
-  onRewritePanel: (idx: number) => Promise<void>;
-  panelInstrOpen: number | null;
-  setPanelInstrOpen: (v: number | null) => void;
-  panelInstruction: string;
-  setPanelInstruction: (v: string) => void;
-  onContinue: () => Promise<SeriesPage | null>;
-  busy: boolean;
-}) {
-  const { page, allPages, currentIndex, onPrev, onNext, onBreakdown, onGenerate, onRegenerate, onRewritePage, pageInstruction, setPageInstruction, onRewritePanel, panelInstrOpen, setPanelInstrOpen, panelInstruction, setPanelInstruction, onContinue, busy } = props;
-  const hasPanels = page.panels.length > 0;
-  const isDone = page.status === 'done';
-  const chapterTitle = allPages.find(x => x.page.id === page.id)?.chapterTitle || '';
-
-  return (
-    <div>
-      {/* —— 页头 —— */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.875rem' }}>
-        <button onClick={onPrev} disabled={currentIndex <= 0} className="iconbtn" style={{ border: '1px solid var(--rule-soft)' }}>
-          <ChevronLeftIcon className="w-4 h-4" />
-        </button>
-        <h3 className="headline headline--lg" style={{ flex: 1 }}>
-          {page.title}
-        </h3>
-        <span className="mono tnum" style={{ fontSize: '0.75rem', color: 'var(--ink-3)' }}>
-          第 {currentIndex + 1} / {allPages.length} 页
-        </span>
-        <button onClick={onNext} disabled={currentIndex >= allPages.length - 1} className="iconbtn" style={{ border: '1px solid var(--rule-soft)' }}>
-          <ChevronRightIcon className="w-4 h-4" />
-        </button>
-      </div>
-
-      {chapterTitle && (
-        <div className="kicker" style={{ marginBottom: '0.5rem' }}>来自：{chapterTitle}</div>
-      )}
-
-      {page.sceneDescription && (
-        <div style={{
-          background: 'var(--bg-soft)',
-          padding: '0.75rem 1rem',
-          marginBottom: '1rem',
-          fontSize: '0.875rem', lineHeight: 1.6,
-          borderLeft: '3px solid var(--accent)',
-        }}>
-          <span className="kicker kicker--accent" style={{ marginRight: '0.5rem' }}>场景</span>
-          {page.sceneDescription}
-        </div>
-      )}
-
-      {/* —— 主操作行 —— */}
-      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem', alignItems: 'center', flexWrap: 'wrap' }}>
-        {!hasPanels && (
-          <button onClick={onBreakdown} disabled={busy} className="btn btn--primary">
-            {busy ? '拆解中…' : '① 拆解分镜 ▸'}
-          </button>
-        )}
-        {hasPanels && !isDone && (
-          <button onClick={onGenerate} disabled={busy} className="btn btn--primary">
-            {busy ? '生成中…' : '② 生成全部图 ▸'}
-          </button>
-        )}
-        {hasPanels && isDone && (
-          <>
-            <button onClick={onRegenerate} disabled={busy} className="btn btn--ghost">
-              <RedoAltIcon className="w-3.5 h-3.5" />重生成整页
-            </button>
-            <button
-              onClick={onContinue}
-              disabled={busy || currentIndex >= allPages.length - 1}
-              title={currentIndex >= allPages.length - 1 ? '已是最后一页' : '基于此页自动续写下一页'}
-              className="btn btn--primary"
-            >
-              一键续写下一页 ▸
-            </button>
-          </>
-        )}
-        <span style={{ flex: 1 }} />
-        <span style={{
-          fontSize: '0.625rem', letterSpacing: '0.18em', textTransform: 'uppercase',
-          color: isDone ? 'var(--accent)' : page.status === 'generating' ? 'var(--ink-2)' : page.status === 'error' ? 'var(--danger)' : 'var(--ink-3)',
-        }}>
-          {isDone ? '已完成' : page.status === 'generating' ? '生成中' : page.status === 'error' ? '出错' : '草稿'}
-        </span>
-      </div>
-
-      {page.errorMessage && (
-        <div style={{ padding: '0.5rem 0.75rem', background: '#FBE9E4', color: 'var(--danger)', fontSize: '0.8125rem', marginBottom: '1rem' }}>
-          {page.errorMessage}
-        </div>
-      )}
-
-      {/* —— 整页改写 —— */}
-      {isDone && (
-        <div style={{ borderTop: '1px solid var(--rule-soft)', paddingTop: '1rem', marginBottom: '1rem' }}>
-          <div className="kicker kicker--accent" style={{ marginBottom: '0.5rem' }}>用一句话改这一页</div>
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
-            <input
-              className="field-input"
-              value={pageInstruction}
-              onChange={e => setPageInstruction(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && onRewritePage()}
-              placeholder="例如：把场景改成夜晚 / 主角今天穿红裙子 / 让配角先说话"
-              style={{ flex: 1 }}
-            />
-            <button onClick={onRewritePage} disabled={busy || !pageInstruction.trim()} className="btn btn--primary">
-              {busy ? '改写中…' : '应用改写'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* —— 分镜网格 —— */}
-      {hasPanels ? (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(11rem, 1fr))', gap: '0.75rem' }}>
-          {page.panels.slice().sort((a, b) => a.index - b.index).map(panel => (
-            <div key={panel.index} className="card" style={{ overflow: 'hidden', padding: 0 }}>
-              <div className="panel-thumb" style={{ aspectRatio: '3 / 4' }}>
-                {panel.imageUrl ? (
-                  <img src={panel.imageUrl} alt="" />
-                ) : (
-                  <span style={{ fontSize: '0.625rem', textAlign: 'center', padding: '0.5rem' }}>{panel.description}</span>
-                )}
-              </div>
-              <div style={{ padding: '0.5rem 0.625rem' }}>
-                <div className="kicker" style={{ fontSize: '0.5625rem' }}>第 {panel.index} 格</div>
-                <div style={{ fontSize: '0.6875rem', color: 'var(--ink-2)', marginTop: '0.25rem', lineHeight: 1.4, display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{panel.description}</div>
-                {panel.dialogue && (
-                  <div style={{ fontSize: '0.6875rem', fontStyle: 'italic', color: 'var(--ink-2)', marginTop: '0.25rem' }}>
-                    「{panel.dialogue}」
-                  </div>
-                )}
-                {isDone && panel.imageUrl && (
-                  <>
-                    <button
-                      onClick={() => setPanelInstrOpen(panelInstrOpen === panel.index ? null : panel.index)}
-                      className="btn btn--link"
-                      style={{ fontSize: '0.6875rem', padding: 0, marginTop: '0.375rem' }}
-                    >
-                      改这一格 {panelInstrOpen === panel.index ? <ChevronUpIcon className="w-3 h-3" /> : <ChevronDownIcon className="w-3 h-3" />}
-                    </button>
-                    {panelInstrOpen === panel.index && (
-                      <div style={{ marginTop: '0.375rem', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
-                        <input
-                          className="field-input"
-                          value={panelInstruction}
-                          onChange={e => setPanelInstruction(e.target.value)}
-                          onKeyDown={e => e.key === 'Enter' && onRewritePanel(panel.index)}
-                          placeholder="例如：换成特写 / 让角色微笑"
-                          style={{ fontSize: '0.75rem', padding: '0.25rem 0' }}
-                          autoFocus
-                        />
-                        <button onClick={() => onRewritePanel(panel.index)} disabled={busy || !panelInstruction.trim()} className="btn btn--primary" style={{ fontSize: '0.6875rem', padding: '0.25rem 0.625rem' }}>
-                          {busy ? '生成中…' : '应用'}
-                        </button>
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div style={{
-          padding: '3rem 1rem', textAlign: 'center',
-          border: '1px dashed var(--rule-soft)',
-          color: 'var(--ink-3)',
-        }}>
-          <EyeIcon className="w-10 h-10 mx-auto mb-2" style={{ opacity: 0.4 }} />
-          <div style={{ fontWeight: 600, color: 'var(--ink-2)' }}>这一页还没拆解分镜</div>
-          <div style={{ fontSize: '0.8125rem', marginTop: '0.25rem' }}>点击上方「① 拆解分镜」开始</div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* —— 罗马数字 —— */
-function toRoman(n: number): string {
-  const map: [number, string][] = [[10,'X'],[9,'IX'],[5,'V'],[4,'IV'],[1,'I']];
-  let r = ''; let v = n;
-  for (const [k, s] of map) { while (v >= k) { r += s; v -= k; } }
-  return r;
-}

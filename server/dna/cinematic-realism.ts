@@ -1,4 +1,4 @@
-// @dna-checksum: 507fd3d403407b7318777119cd021ae5efecf788a50940c1eba6318a98304a7f
+// @dna-checksum: 442594c96ddcb99ff964109abf837a4fcfb5ee3e3f60bfc9c6b53c03adcd74b5
 /**
  * ═══════════════════════════════════════════════════════════════════════════
  *  DNA 预设三：电影化写实（Cine-Photo Realism）
@@ -274,6 +274,94 @@ Expression rules (cine-photo realism edition):
 - The viewer should NOT be told what the character feels.
   The viewer should be left guessing — and that guessing is
   the genre's pleasure.
+`;
+
+/**
+ * 角色参考图专用 system prompt（character reference sheet）。
+ *
+ * 与 IMAGE_SYSTEM_PROMPT 的关键差异：
+ *  - 角色图是「白底中性模板」——只画一个角色，不画场景
+ *  - IMAGE_SYSTEM_PROMPT 里 [SCENE — REAL LOCATIONS, NATURAL LIGHT] 段落列举了大量
+ *    咖啡馆、公寓、街道、医院走廊等场景例子，会把场景画到角色图上
+ *  - 本字段只保留 [TONE / FACES / CLOTHING / PALETTE / LIGHTING] 这五个跟角色外观
+ *    相关的段落，跳过 [SCENE / WHAT THIS IS NOT] 这两个会引入场景的段落
+ *  - 风格色调仍然保留（电影化写实的肤色色温、肤质颗粒感、服装色调倾向），确保角色
+ *    模板与后续分镜图风格一致
+ */
+export const IMAGE_CHARACTER_SYSTEM_PROMPT = `
+You are capturing a single photographic portrait of one person —
+a character reference sheet that will be reused as the visual
+anchor for every page of a serious contemporary cinematic drama.
+The spirit is the same as IMAGE_SYSTEM_PROMPT (Hong Sang-soo,
+Nuri Bilge Ceylan, Asghar Farhadi, Lee Chang-dong, Kenneth
+Lonergan), BUT for this task:
+
+[TONE — PORTRAIT, NOT SCENE]
+
+This is a portrait. The subject is a person who could step out
+of one of those directors' films. The frame is held for them,
+not for a location. Background is neutral, never the point.
+
+[LINEWORK — NONE]
+
+There is NO ink line, NO pen stroke, NO outline. Everything is
+rendered by light, focus, and color. The image is photographic
+in its rendering. If you must mention "edges", describe them
+as "naturally defined by light and focus", never as "outlined".
+
+[FACES — REAL HUMANS, NOT CHARACTERS]
+
+Faces are adult, lived-in, slightly imperfect. The pores are
+visible. The eyes have dark circles. The hair is unstyled or
+very simply maintained. There is no "anime shine", no "IG
+filter glow". Aging is visible — a 45-year-old looks 45. A
+30-year-old looks 30. The viewer should feel "I have seen
+this person somewhere".
+
+Specifically:
+  - Eyes: real human eyes. No enlarged iris, no sparkles, no
+    anime shine. Bags, slight redness, and natural moisture
+    are allowed and encouraged.
+  - Eyebrows: slightly uneven, natural growth pattern.
+  - Skin: visible texture, pores, fine lines, sun damage,
+    mild redness. NO plastic / airbrushed smoothness.
+  - Lips: dry, sometimes chapped. Natural tone. No gloss.
+  - Jaw: ordinary. A 50-year-old has softening, not a
+    defined jawline.
+  - Hair: unstyled. Windblown, slept-on. Slightly grey at
+    temples on older characters.
+
+[CLOTHING — UNREMARKABLE]
+
+Clothes are unremarkable. They have been worn. Maybe slightly
+wrinkled, slightly pilled. Colors are muted — grey, navy,
+olive, off-white, brown, charcoal. The subject does NOT look
+fashionable. They look like a person who got dressed this
+morning without thinking about it.
+
+[PALETTE — DESATURATED BUT ALIVE]
+
+Skin: natural, slightly warm, slightly tired. Clothing: muted
+earth tones. The palette should look like a movie print, not
+a magazine spread. White balance is real.
+
+[LIGHTING — NATURAL, FALLIBLE]
+
+Available light is the default — soft, even, frontal or 45
+degrees from upper-front. The lighting reveals the face
+honestly. Shadows are soft but real. No Hollywood key light,
+no dramatic rim, no "AI cinematic backlight".
+
+[WHAT THIS IS NOT]
+
+NOT an illustration. NOT a comic panel. NOT anime. NOT manga.
+NOT a "beautiful AI illustration". NOT a glamour shot. NOT a
+stock photo.
+
+THIS IS a single portrait of a real person, photographed for
+later reuse as the reference for that person across many
+scenes. The viewer should believe this person will continue
+living in that film after the frame ends.
 `;
 
 export const VISUAL_PHILOSOPHY = `

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { useSeries } from '../contexts/SeriesContext';
+import { useSeries, flattenSeriesChapters } from '../contexts/SeriesContext';
 import { AgentEngine } from '../services/agentEngine';
-import { exportSeriesAsStrips } from '../services/stripExport';
+import { exportSeriesAsEpisodeStrips } from '../services/stripExport';
 import { AgentChatPanel } from './AgentChatPanel';
 import { SeriesWorkbench } from './SeriesWorkbench';
 import type { ChatMessage, AgentStage } from '../types';
@@ -11,6 +11,7 @@ import { useKeyboard } from '../hooks/useKeyboard';
 import { useLocalization } from '../hooks/useLocalization';
 import { Language } from '../locales/locales';
 import { CogIcon } from './icons';
+import { PublisherModal } from './PublisherModal';
 
 /**
  * 顶层布局（杂志风）：
@@ -60,32 +61,34 @@ function AgentWorkbenchInner(props: {
     genWorldview: (hint?: string) => ctx.generateWorldviewForCurrent(hint),
     genCharacters: (hint?: string) => ctx.generateCharactersForCurrent(hint),
     genChapters: (target) => ctx.generateChaptersForCurrent(target),
-    breakdownPage: async (id) => {
-      await ctx.breakdownSelectedPage();
-      return ctx.currentSeries?.chapters.flatMap(c => c.pages).find(p => p.id === id) || null;
-    },
-    generatePage: async (id) => {
-      await ctx.generateSelectedPage();
-      return ctx.currentSeries?.chapters.flatMap(c => c.pages).find(p => p.id === id) || null;
-    },
-    regeneratePage: async (id) => {
-      await ctx.regenerateSelectedPage();
-      return ctx.currentSeries?.chapters.flatMap(c => c.pages).find(p => p.id === id) || null;
-    },
-    rewritePage: async (id, instr) => {
-      await ctx.rewriteSelectedPage(instr);
-      return ctx.currentSeries?.chapters.flatMap(c => c.pages).find(p => p.id === id) || null;
-    },
-    continueNextPage: async (id) => ctx.continueFromSelectedPage(),
+    // —— 显式 pageId 版本（引擎传 id，不再隐式依赖 selectedPageId） ——
+    breakdownPage: (id) => ctx.breakdownPageInCurrent(id),
+    generatePage: (id) => ctx.generatePageInCurrent(id),
+    regeneratePage: (id) => ctx.regeneratePageInCurrent(id),
+    rewritePage: (id, instr) => ctx.rewritePageInCurrent(id, instr),
+    continueNextPage: (id) => ctx.continuePageInCurrent(id),
     deleteCharacter: async (id) => { await ctx.deleteCharacterFromCurrent(id); },
     selectPage: (id) => ctx.setSelectedPageId(id),
     getSelectedPageId: () => ctx.selectedPageId,
+    // —— 话级模型 ——
+    genArcs: () => ctx.generateArcsForCurrent(),
+    genArcChapters: (arcId, opts) => ctx.generateArcChaptersForCurrent(arcId, opts),
+    generatePanel: (pageId, panelIndex) => ctx.generatePanelInCurrent(pageId, panelIndex),
+    selectEpisode: (chapterId) => {
+      ctx.setSelectedEpisodeId(chapterId);
+      const ch = flattenSeriesChapters(ctx.currentSeries).find(c => c.id === chapterId);
+      const first = ch?.pages ? [...ch.pages].sort((a, b) => a.pageNumber - b.pageNumber)[0] : undefined;
+      if (first) ctx.setSelectedPageId(first.id);
+      ctx.setStep('pages');
+    },
+    getSelectedEpisodeId: () => ctx.selectedEpisodeId,
   });
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [stage, setStage] = useState<AgentStage>('idle');
   const [chatCollapsed, setChatCollapsed] = useState(true);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [publisherOpen, setPublisherOpen] = useState(false);
 
   useEffect(() => {
     const e = engineRef.current!;
@@ -140,7 +143,7 @@ function AgentWorkbenchInner(props: {
 
   function gotoPage(delta: number) {
     if (!currentSeries) return;
-    const all = currentSeries.chapters.flatMap(ch =>
+    const all = flattenSeriesChapters(currentSeries).flatMap(ch =>
       ch.pages.map(p => ({ chapterId: ch.id, pageId: p.id }))
     );
     if (all.length === 0) return;
@@ -152,7 +155,7 @@ function AgentWorkbenchInner(props: {
   // 顶栏要展示的进度
   const progress = useMemo(() => {
     if (!currentSeries) return null;
-    const pages = currentSeries.chapters.flatMap(c => c.pages);
+    const pages = flattenSeriesChapters(currentSeries).flatMap(c => c.pages);
     return {
       done: pages.filter(p => p.status === 'done').length,
       total: pages.length,
@@ -173,11 +176,14 @@ function AgentWorkbenchInner(props: {
         language={props.language}
         setLanguage={props.setLanguage}
         onOpenModelConfig={props.onOpenModelConfig}
-        onExport={currentSeries && currentSeries.chapters.length > 0
+        onPublish={currentSeries && flattenSeriesChapters(currentSeries).length > 0
+          ? () => setPublisherOpen(true)
+          : undefined}
+        onExport={currentSeries && flattenSeriesChapters(currentSeries).length > 0
           ? () => {
-              const all = currentSeries.chapters.flatMap(c => c.pages);
-              exportSeriesAsStrips(all, currentSeries.title)
-                .then(n => toast.push(n > 0 ? `已导出 ${n} 页条漫长图` : '暂无可导出的分镜图', n > 0 ? 'success' : 'error'))
+              // 按话导出：每话一张话级长图（含文案三件套，话号全局连续）
+              exportSeriesAsEpisodeStrips(currentSeries)
+                .then(n => toast.push(n > 0 ? `已导出 ${n} 话长图` : '暂无可导出的分镜图', n > 0 ? 'success' : 'error'))
                 .catch(e => toast.push(e.message || '导出失败', 'error'));
             }
           : undefined}
@@ -214,6 +220,12 @@ function AgentWorkbenchInner(props: {
         onConfirm={confirmDelete}
         onCancel={() => setPendingDelete(null)}
       />
+
+      <PublisherModal
+        open={publisherOpen}
+        onClose={() => setPublisherOpen(false)}
+        series={currentSeries}
+      />
     </div>
   );
 }
@@ -234,6 +246,7 @@ interface TopBarProps {
   language?: Language;
   setLanguage?: (lang: Language) => void;
   onOpenModelConfig?: () => void;
+  onPublish?: () => void;
   onExport?: () => void;
 }
 
@@ -254,6 +267,7 @@ function TopBar(props: TopBarProps): React.ReactElement {
 
   return (
     <header
+      data-topbar
       ref={ref}
       style={{
         flexShrink: 0,
@@ -331,6 +345,17 @@ function TopBar(props: TopBarProps): React.ReactElement {
             <span className="kicker" style={{ fontSize: '0.5625rem', color: 'var(--ink-3)' }}>未开始</span>
           )}
 
+          {/* 快捷键提示（此前完全不可发现） */}
+          {props.progress && props.progress.total > 0 && (
+            <span
+              className="kicker"
+              style={{ fontSize: '0.5625rem', color: 'var(--ink-3)', marginLeft: '0.5rem', whiteSpace: 'nowrap' }}
+              title="快捷键：[ ] 翻页 · R 重新生成当前页 · Esc 取消"
+            >
+              [ ] 翻页 · R 重新生成
+            </span>
+          )}
+
           <div style={{ flex: 1 }} />
 
           {/* 折叠聊天 */}
@@ -394,12 +419,22 @@ function TopBar(props: TopBarProps): React.ReactElement {
               {t('export')}
             </button>
           )}
+
+          {/* 发布（公众号图文） */}
+          {props.onPublish && (
+            <button className="btn btn--ghost" onClick={props.onPublish}
+              style={{ padding: '0.375rem 0.75rem', fontSize: '0.75rem' }}
+              title="发布到公众号图文">
+              发布
+            </button>
+          )}
         </div>
       </div>
 
       {/* 项目下拉菜单（顶栏下方展开） */}
       {dropdown === 'project' && (
         <div
+          data-topbar-project-menu
           className="card fade-in"
           style={{
             position: 'absolute',
@@ -435,8 +470,9 @@ function TopBar(props: TopBarProps): React.ReactElement {
             </div>
           )}
           {props.seriesList.map(s => {
-            const totalPages = s.chapters.reduce((sum, c) => sum + c.pages.length, 0);
-            const donePages = s.chapters.reduce((sum, c) => sum + c.pages.filter(p => p.status === 'done').length, 0);
+            const flat = flattenSeriesChapters(s);
+            const totalPages = flat.reduce((sum, c) => sum + c.pages.length, 0);
+            const donePages = flat.reduce((sum, c) => sum + c.pages.filter(p => p.status === 'done').length, 0);
             const active = props.currentSeriesId === s.id;
             return (
               <div
@@ -462,7 +498,7 @@ function TopBar(props: TopBarProps): React.ReactElement {
                     {s.title || '（未命名）'}
                   </span>
                   <span style={{ fontSize: '0.6875rem', color: 'var(--ink-3)' }}>
-                    {s.chapters.length} 章 · {donePages}/{totalPages} 页
+                    {flat.length} 章 · {donePages}/{totalPages} 页
                   </span>
                 </button>
                 <button

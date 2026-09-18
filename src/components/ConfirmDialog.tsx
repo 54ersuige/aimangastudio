@@ -20,11 +20,12 @@ export function ConfirmDialog(props: ConfirmDialogProps): React.ReactElement | n
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onCancel();
-      if (e.key === 'Enter') onConfirm();
+      // 危险操作不绑定 Enter —— 防止弹窗刚打开时手滑 Enter 直接触发删除
+      if (e.key === 'Enter' && !danger) onConfirm();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [open, onCancel, onConfirm]);
+  }, [open, onCancel, onConfirm, danger]);
 
   if (!open) return null;
   return (
@@ -39,11 +40,11 @@ export function ConfirmDialog(props: ConfirmDialogProps): React.ReactElement | n
         )}
         <hr className="rule" />
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem' }}>
-          <button className="btn btn--ghost" onClick={onCancel}>{cancelText}</button>
+          <button className="btn btn--ghost" onClick={onCancel} autoFocus={danger}>{cancelText}</button>
           <button
             className={`btn ${danger ? 'btn--danger' : 'btn--primary'}`}
             onClick={onConfirm}
-            autoFocus
+            autoFocus={!danger}
           >
             {confirmText}
           </button>

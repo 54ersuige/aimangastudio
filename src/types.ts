@@ -3,16 +3,30 @@
 
 export type {
   Worldview,
+  CharacterBlueprint,
+  ArcBlueprint,
   CharacterRole,
+  // 2026-09-01 新增：性别 / 年龄段枚举与常量
+  CharacterGender,
+  CharacterAgeBand,
   SeriesCharacter,
   Panel,
   PageStatus,
   SeriesPage,
   Chapter,
+  Arc,
   Series,
   StoryCreatorStep,
   TaskState,
+  DraftBlock,
+  CastMember,
+  DraftTypography,
+  DraftTemplateId,
+  ArticleDraft,
+  TitleSuggestion,
 } from '../shared/types';
+
+export { CHARACTER_GENDERS, CHARACTER_AGE_BANDS } from '../shared/types';
 
 import type { Worldview, SeriesCharacter, Chapter, SeriesPage } from '../shared/types';
 

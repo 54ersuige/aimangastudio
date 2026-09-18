@@ -1,0 +1,658 @@
+import { Router } from 'express';
+import { z } from 'zod';
+import { getConfig } from '../config.js';
+import { sendError, logGeneration } from '../utils.js';
+import { withDnaImagePrompt } from '../dna-inject.js';
+import { runTask, DuplicateTaskError } from '../task-queue.js';
+import { deleteStoredImage, isStoredImagePath, saveDataUrlImage } from '../image-store.js';
+import { getSeries, updatePage, replacePanels, insertPanel, deletePanel } from '../series-store.js';
+import type { Chapter, SeriesPage } from '../series-store.js';
+import { callStructuredJson, seriesDnaKey, findPage, sanitizePanels, iterAllChapters, PanelBreakdownZ, PanelRewriteZ, getImageProvider } from './helpers.js';
+import { collectPanelCharacterRefs, generatePanelImages, buildPanelImagePrompt, buildRecentContext, getStyleRefs } from './prompts.js';
+
+const router = Router();
+
+// ========== Step 4: 单页分镜 + 页面生成 ==========
+
+const PanelBreakdownSchema = {
+  type: 'object',
+  properties: {
+    title: { type: 'string' },
+    sceneDescription: { type: 'string', description: '本批整体场景描述，1-2 句' },
+    panels: {
+      type: 'array',
+      minItems: 2,
+      maxItems: 8,
+      items: {
+        type: 'object',
+        properties: {
+          index: { type: 'integer' },
+          description: { type: 'string', description: '单格画面描述，60-120字：人物位置与相对距离、具体动作/手势、视线方向、1-2个关键道具及其状态。道具一律无字（禁止"印着XX/写着XX"）。服装与角色设定一致。' },
+          dialogue: { type: 'string', description: '面向读者的旁白或对话文字（1-2句），如"陈默推开玻璃门"或"「终于到了。」"。必填，不可为空。' },
+          camera: { type: 'string', description: '镜头景别+角度，取值：远景/全景/中景/中近景/近景/特写，可加角度后缀（如"中景，轻微仰角"）。' },
+          characterIds: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '出场角色 ID 列表（仅限角色库中的主要角色）',
+          },
+          extraCharacters: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', description: '无名配角称呼，如"前台接待员"' },
+                appearance: { type: 'string', description: '一句话外貌（性别+年龄+发型+服装+体态），必须与角色库中所有角色明显不同' },
+              },
+              required: ['name', 'appearance'],
+            },
+            description: '本格出现但不在角色库中的一次性配角（前台、路人、同事等）。画面里出现的每一个人都必须被登记：要么在 characterIds，要么在 extraCharacters。',
+          },
+        },
+        required: ['index', 'description', 'characterIds'],
+      },
+    },
+  },
+  required: ['title', 'sceneDescription', 'panels'],
+} as const;
+
+/**
+ * 专业分镜规则 —— breakdown / continue / rewrite 三处共用。
+ * 老油条案例复盘：分镜"不专业"的根因是系统从未向模型提出任何镜头语言要求，
+ * 模型只会按句子平均切格、景别随机、人物登记混乱。
+ */
+const STORYBOARD_RULES = `
+【分格数量 —— 硬性要求】本批固定拆成 6 格，不多不少。此要求覆盖其他任何格数建议（包括世界观描述中的格数说法）。
+【分镜专业规则 —— 必须逐条遵守】
+1. 镜头节奏：景别变化必须服务叙事。同一场戏的连续对话允许同机位/同景别连续 2-3 格（Adrian Tomine 的对话段就是这样画的），禁止为了"景别曲线"而强行切机位 —— 那会让画面变碎。开篇可用一格全景交代空间，之后优先用稳定机位推进。
+2. 视线与轴线：对话格优先用过肩或3/4侧面，保持人物左右位置全批一致（180度轴线）；人物视线方向要与下一格画面衔接。
+3. 一格一个完整节拍：每格承载一个完整的交流回合或动作（一句话+一个反应、一个完整动作），禁止把同一个动作/同一句话切碎塞进多格 —— 碎片化是叙事大忌。
+4. 空镜按需使用：当剧情需要停顿/转场时可以用一格空镜或人物极小的环境格，但不是每批必需。
+5. 人物登记完整性：画面中出现的每一个人都必须登记 —— 角色库中的人用 characterIds（填其 ID），一次性配角（前台/路人/同事）用 extraCharacters（给称呼+一句话外貌，外貌必须明显区别于角色库所有人物，避免混淆）。
+6. description 只写镜头可见内容（构图/景别/人物位置/动作/表情/光线/留白），不要写心理活动、不要写读者旁白 —— 旁白放 dialogue 字段。
+7. description 信息密度（防"AI 自由猜测"）：每格 description 至少写清 ①每个出场人物的位置与相对距离 ②人物正在做的具体动作/手势 ③视线方向（看谁/看哪/看地面）④1-2 个关键道具及其状态。目标 60-120 字，禁止只写"某某坐在工位上"这类一句话概览。
+8. 服装连续性（防人物不一致）：同一场景内每个角色的服装必须与角色设定完全一致，禁止自行更换；只有剧情明确要求（换班/回家/隔天）时才可在 description 里写明"已换穿……"。
+9. 道具一律无字（防乱码）：任何书籍/手册/招牌/屏幕/卡片/文件/海报都不得指定可读文字 —— 禁止"印着『XX』『写着XX』"这类写法，一律写"无字/字迹虚化"。图内出现任何可读文字都是失败品。
+10. 批内与批间一致性：整批共用同一时间点、同一光源（如"傍晚自然窗光"）、同一地点；相邻批尽量延续同一场景与动作流，除非剧情推进需要换场。光线方向与人物外观状态不得跳变。`;
+
+router.post('/series/:id/pages/:pageId/breakdown', async (req, res) => {
+  const series = getSeries(req.params.id);
+  if (!series) return sendError(res, 404, 'Series not found');
+  const found = findPage(series, req.params.pageId);
+  if (!found) return sendError(res, 404, 'Page not found');
+  const dnaKey = seriesDnaKey(series);
+  const { chapter: targetChapter, page: targetPage } = found;
+  try {
+    // P2-9：跨章收集最近 3 页前文，AI 不再对之前发生的事一无所知
+    const recentContext = buildRecentContext(series, targetPage.id, false, 3);
+    // 角色库只给"名字 + 定位 + 一句话核心外貌"，完整外貌在出图阶段才需要。
+    // 此前把整段 appearance 塞进 breakdown prompt，既撑长上下文又稀释模型对分镜规则的注意力。
+    const charLib = series.characters.map(c => {
+      const brief = (c.roleInStory || c.description || c.appearance || '').replace(/\s+/g, ' ').slice(0, 40);
+      return `- id=${c.id} 名字=${c.name}（${c.role}）：${brief}`;
+    }).join('\n');
+    const prompt = `为以下漫画批次拆出恰好 6 个分镜（每批固定 6 格）。\n\n系列：${series.title}\n世界观：${series.worldview?.era} / ${series.worldview?.artStyle}\n所属话：《${targetChapter.title}》 - ${targetChapter.summary}\n\n角色库（主要角色）：\n${charLib}\n\n前文剧情（保持连续，不要重复已发生的情节）：\n${recentContext}\n\n当前批次：第 ${targetPage.pageNumber} 批（属于"${targetChapter.title}"这一话）\n请把这一批拆成恰好 6 个分镜。${STORYBOARD_RULES}\n\n重要：每个分镜的 dialogue 字段必须填写面向读者的旁白或对话文字（1-2 句）。这是漫画中读者实际看到的文字内容，不是镜头指令。description 是镜头描述（如"中景，从背后拍摄"），dialogue 是读者看到的文字（如"陈默推开玻璃门，手里攥着录用通知"或"「终于到了。」"）。两者缺一不可。`;
+    const result = await callStructuredJson<z.infer<typeof PanelBreakdownZ>>(
+      prompt,
+      '你是一位漫画分镜师。请输出严格的 JSON 格式。',
+      PanelBreakdownSchema as Record<string, unknown>,
+      {
+        dnaKey,
+        logKind: 'breakdown',
+        logMeta: { seriesId: series.id, pageId: targetPage.id },
+        validate: raw => {
+          const v = PanelBreakdownZ.parse(raw);
+          // 单页固定 6 格：不符则打回重试（callStructuredJson 会带着更严格的提示重问）
+          if (v.panels.length !== 6) throw new Error(`本批必须恰好 6 格，模型输出了 ${v.panels.length} 格，请重新输出恰好 6 格。`);
+          return v;
+        },
+      },
+    );
+    // P1-8：幻觉角色 ID 过滤 + index 规整
+    const validIds = new Set(series.characters.map(c => c.id));
+    const panels = sanitizePanels(result.panels, validIds, `breakdown 第${targetPage.pageNumber}页`);
+    if (!panels) return sendError(res, 502, '模型未返回有效分镜，请重试');
+    const allCharIds = new Set<string>();
+    panels.forEach(p => p.characterIds.forEach(id => allCharIds.add(id)));
+    // 重新设计分镜：旧分镜已作废，清理其已落盘图片（IO 失败不阻断）
+    let removedImages = 0;
+    for (const pn of targetPage.panels) {
+      if (pn.imageUrl && isStoredImagePath(pn.imageUrl) && deleteStoredImage(pn.imageUrl)) removedImages += 1;
+    }
+    const updated = updatePage(series.id, targetChapter.id, targetPage.id, {
+      title: result.title || targetPage.title,
+      sceneDescription: result.sceneDescription,
+      panels,
+      characterIds: Array.from(allCharIds),
+      // 状态重置回草稿：旧图已删，不能再让前端误判"已完成"
+      status: 'draft',
+      errorMessage: undefined,
+    });
+    if (removedImages > 0) console.log(`[pages] 重新拆解第 ${targetPage.pageNumber} 页：清理旧图 ${removedImages} 张`);
+    res.json({ page: updated });
+  } catch (e: any) {
+    sendError(res, 502, e.message || 'Page breakdown failed');
+  }
+});
+
+// 手动编辑：保存 page 元数据（页标题/场景描述/角色清单等）
+const UpdatePageSchema = z.object({
+  title: z.string().optional(),
+  sceneDescription: z.string().optional(),
+  characterIds: z.array(z.string()).optional(),
+});
+
+router.patch('/series/:id/pages/:pageId', (req, res) => {
+  const series = getSeries(req.params.id);
+  if (!series) return sendError(res, 404, 'Series not found');
+  const found = findPage(series, req.params.pageId);
+  if (!found) return sendError(res, 404, 'Page not found');
+  const parsed = UpdatePageSchema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, parsed.error.message);
+  const updated = updatePage(series.id, found.chapter.id, found.page.id, parsed.data);
+  if (!updated) return sendError(res, 500, 'Failed to update page');
+  res.json({ page: updated });
+});
+
+// 手动编辑：保存 page 的 panels（整体替换）。改完后退回 draft。
+const ReplacePanelsSchema = z.object({
+  panels: z.array(z.object({
+    id: z.string().optional(),
+    index: z.number().optional(),
+    description: z.string(),
+    dialogue: z.string().default(''),
+    // 历史版本用 'characters'；新版本统一 'characterIds'。两者都接受，内部归一为 characterIds。
+    characterIds: z.array(z.string()).optional().default([]),
+    characters: z.array(z.string()).optional().default([]),
+    camera: z.string().default('mid'),
+    emotion: z.string().default(''),
+    extraCharacters: z.array(z.object({
+      name: z.string().min(1),
+      appearance: z.string().min(1),
+    })).optional(),
+  })),
+});
+
+router.put('/series/:id/pages/:pageId/panels', (req, res) => {
+  const series = getSeries(req.params.id);
+  if (!series) return sendError(res, 404, 'Series not found');
+  const found = findPage(series, req.params.pageId);
+  if (!found) return sendError(res, 404, 'Page not found');
+  const parsed = ReplacePanelsSchema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, parsed.error.message);
+  // 归一化 characterIds（兼容旧字段 characters）
+  const normalizedPanels = parsed.data.panels.map(p => ({
+    ...p,
+    characterIds: p.characterIds && p.characterIds.length > 0 ? p.characterIds : p.characters,
+  }));
+  const updated = replacePanels(series.id, found.chapter.id, found.page.id, normalizedPanels as any);
+  if (!updated) return sendError(res, 500, 'Failed to replace panels');
+  res.json({ page: updated });
+});
+
+// 手动编辑：在 page 中插入新 panel
+router.post('/series/:id/pages/:pageId/panels/insert', (req, res) => {
+  const series = getSeries(req.params.id);
+  if (!series) return sendError(res, 404, 'Series not found');
+  const found = findPage(series, req.params.pageId);
+  if (!found) return sendError(res, 404, 'Page not found');
+  const insertAt = typeof req.body?.insertAt === 'number' ? req.body.insertAt : undefined;
+  const updated = insertPanel(series.id, found.chapter.id, found.page.id, insertAt);
+  if (!updated) return sendError(res, 500, 'Failed to insert panel');
+  res.json({ page: updated });
+});
+
+// 精细编辑：直接改某一格的 dialogue 字段（旁白或对话），不重生成图片。
+router.patch('/series/:id/pages/:pageId/panels/:panelIndex/dialogue', (req, res) => {
+  const series = getSeries(req.params.id);
+  if (!series) return sendError(res, 404, 'Series not found');
+  const found = findPage(series, req.params.pageId);
+  if (!found) return sendError(res, 404, 'Page not found');
+  const idx = Number(req.params.panelIndex);
+  const target = found.page.panels.find(p => p.index === idx);
+  if (!target) return sendError(res, 404, `Panel #${idx + 1} not found`);
+  const dialogue = typeof req.body?.dialogue === 'string' ? req.body.dialogue : '';
+  // 走 store 的整体替换接口（replacePanels）持久化，避免内部改对象+saveSeries 散落在多处。
+  const newPanels = found.page.panels.map(p => p.index === idx ? { ...p, dialogue } : p);
+  const updated = replacePanels(series.id, found.chapter.id, found.page.id, newPanels);
+  if (!updated) return sendError(res, 500, 'Failed to update panel dialogue');
+  res.json({ page: updated });
+});
+
+// 手动编辑：删除 page 中一个 panel
+router.delete('/series/:id/pages/:pageId/panels/:panelId', (req, res) => {
+  const series = getSeries(req.params.id);
+  if (!series) return sendError(res, 404, 'Series not found');
+  const found = findPage(series, req.params.pageId);
+  if (!found) return sendError(res, 404, 'Page not found');
+  const updated = deletePanel(series.id, found.chapter.id, found.page.id, req.params.panelId);
+  if (!updated) return sendError(res, 500, 'Failed to delete panel');
+  res.json({ page: updated });
+});
+
+router.post('/series/:id/pages/:pageId/generate', async (req, res) => {
+  const series = getSeries(req.params.id);
+  if (!series) return sendError(res, 404, 'Series not found');
+  const found = findPage(series, req.params.pageId);
+  if (!found) return sendError(res, 404, 'Page not found');
+  const dnaKey = seriesDnaKey(series);
+  const { chapter: targetChapter, page: targetPage } = found;
+  if (targetPage.panels.length === 0) return sendError(res, 400, '请先生成分镜');
+  if (targetPage.status === 'generating') return sendError(res, 409, '该页正在生成中，请稍候');
+  // 同步置为 generating：利用单线程原子性挡住并发重复点击
+  updatePage(series.id, targetChapter.id, targetPage.id, { status: 'generating', errorMessage: undefined });
+
+  // 增量语义（2026-09-02 话级模型）：generate 只补缺失格，已有图不动（整批重画走 regenerate）
+  const sortedAll = [...targetPage.panels].sort((a, b) => a.index - b.index);
+  const missingPanels = sortedAll.filter(p => !p.imageUrl);
+  if (missingPanels.length === 0) return sendError(res, 400, '本批分镜图已齐全；如需整批重画请用「重画此批」');
+  let taskId: string;
+  try {
+    taskId = runTask(`page:${targetPage.id}`, 'page-generate', async () => {
+      try {
+        const paths = await generatePanelImages(series, targetPage.sceneDescription, missingPanels, `generate 第${targetPage.pageNumber}页`, dnaKey);
+        const pathByIndex = new Map(missingPanels.map((p, i) => [p.index, paths[i]] as const));
+        const updatedPanels = sortedAll.map(p => p.imageUrl ? p : { ...p, imageUrl: pathByIndex.get(p.index)! });
+        const updated = updatePage(series.id, targetChapter.id, targetPage.id, {
+          panels: updatedPanels,
+          status: 'done',
+        });
+        return { page: updated };
+      } catch (e: any) {
+        updatePage(series.id, targetChapter.id, targetPage.id, { status: 'error', errorMessage: e.message });
+        throw e;
+      }
+    });
+  } catch (e: any) {
+    if (e instanceof DuplicateTaskError) {
+      return sendError(res, 409, '该页正在生成中，请稍候');
+    }
+    updatePage(series.id, targetChapter.id, targetPage.id, { status: 'error', errorMessage: e.message });
+    return sendError(res, 500, e.message || 'Failed to start task');
+  }
+  res.json({ taskId });
+});
+
+// 单个分镜重生（整页重画）
+router.post('/series/:id/pages/:pageId/regenerate', async (req, res) => {
+  const series = getSeries(req.params.id);
+  if (!series) return sendError(res, 404, 'Series not found');
+  const found = findPage(series, req.params.pageId);
+  if (!found) return sendError(res, 404, 'Page not found');
+  const dnaKey = seriesDnaKey(series);
+  const { chapter: targetChapter, page: targetPage } = found;
+  if (targetPage.panels.length === 0) return sendError(res, 400, '请先生成分镜');
+  if (targetPage.status === 'generating') return sendError(res, 409, '该页正在生成中，请稍候');
+  updatePage(series.id, targetChapter.id, targetPage.id, { status: 'generating', errorMessage: undefined });
+
+  let taskId: string;
+  try {
+    taskId = runTask(`page:${targetPage.id}`, 'page-regenerate', async () => {
+      try {
+        const paths = await generatePanelImages(series, targetPage.sceneDescription, targetPage.panels, `regenerate 第${targetPage.pageNumber}页`, dnaKey);
+        const updatedPanels = [...targetPage.panels]
+          .sort((a, b) => a.index - b.index)
+          .map((p, i) => ({ ...p, imageUrl: paths[i] }));
+        const updated = updatePage(series.id, targetChapter.id, targetPage.id, {
+          panels: updatedPanels,
+          status: 'done',
+          errorMessage: undefined,
+        });
+        return { page: updated };
+      } catch (e: any) {
+        updatePage(series.id, targetChapter.id, targetPage.id, { status: 'error', errorMessage: e.message });
+        throw e;
+      }
+    });
+  } catch (e: any) {
+    if (e instanceof DuplicateTaskError) {
+      return sendError(res, 409, '该页正在生成中，请稍候');
+    }
+    updatePage(series.id, targetChapter.id, targetPage.id, { status: 'error', errorMessage: e.message });
+    return sendError(res, 500, e.message || 'Failed to start task');
+  }
+  res.json({ taskId });
+});
+
+// ========== 单格（重）生成 ==========
+// 只出这一格的图，不改文字描述。已有图时视为重掷（换一张），文字修改走 rewrite / dialogue 端点。
+router.post('/series/:id/pages/:pageId/panels/:panelIndex/generate', async (req, res) => {
+  const series = getSeries(req.params.id);
+  if (!series) return sendError(res, 404, 'Series not found');
+  const found = findPage(series, req.params.pageId);
+  if (!found) return sendError(res, 404, 'Page not found');
+  const { chapter: targetChapter, page: targetPage } = found;
+  if (targetPage.panels.length === 0) return sendError(res, 400, '请先生成分镜');
+  if (targetPage.status === 'generating') return sendError(res, 409, '该页正在生成中，请稍候');
+  const panelIndex = Number(req.params.panelIndex);
+  const targetPanel = targetPage.panels.find(p => p.index === panelIndex);
+  if (!targetPanel) return sendError(res, 404, 'Panel not found');
+  const dnaKey = seriesDnaKey(series);
+
+  // 不整页置 generating（避免其余格全部显示"生成中"）；同页并发由 runTask 任务键互斥兜底。
+  let taskId: string;
+  try {
+    taskId = runTask(`page:${targetPage.id}`, 'panel-generate', async () => {
+      try {
+        const paths = await generatePanelImages(series, targetPage.sceneDescription, [targetPanel], `panel 第${targetPage.pageNumber}页#${panelIndex}`, dnaKey);
+        const updatedPanels = [...targetPage.panels]
+          .sort((a, b) => a.index - b.index)
+          .map(p => p.index === panelIndex ? { ...p, imageUrl: paths[0] } : p);
+        const allDone = updatedPanels.every(p => !!p.imageUrl);
+        const updated = updatePage(series.id, targetChapter.id, targetPage.id, {
+          panels: updatedPanels,
+          status: allDone ? 'done' : 'draft',
+          errorMessage: undefined,
+        });
+        return { page: updated };
+      } catch (e: any) {
+        updatePage(series.id, targetChapter.id, targetPage.id, { status: 'error', errorMessage: e.message });
+        throw e;
+      }
+    });
+  } catch (e: any) {
+    if (e instanceof DuplicateTaskError) {
+      return sendError(res, 409, '该页正在生成中，请稍候');
+    }
+    return sendError(res, 500, e.message || 'Failed to start task');
+  }
+  res.json({ taskId });
+});
+
+// ========== 自然语言改写单页 ==========
+
+const PageRewriteSchema = {
+  type: 'object',
+  properties: {
+    title: { type: 'string' },
+    sceneDescription: { type: 'string' },
+    panels: {
+      type: 'array',
+      minItems: 2,
+      maxItems: 8,
+      items: {
+        type: 'object',
+        properties: {
+          index: { type: 'integer' },
+          description: { type: 'string' },
+          dialogue: { type: 'string' },
+          camera: { type: 'string', description: '镜头景别+角度：远景/全景/中景/中近景/近景/特写' },
+          characterIds: { type: 'array', items: { type: 'string' } },
+          extraCharacters: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                appearance: { type: 'string' },
+              },
+              required: ['name', 'appearance'],
+            },
+            description: '不在角色库中的一次性配角（画面里出现的每个人都要登记）',
+          },
+        },
+        required: ['index', 'description', 'characterIds'],
+      },
+    },
+  },
+  required: ['title', 'sceneDescription', 'panels'],
+} as const;
+
+router.post('/series/:id/pages/:pageId/rewrite', async (req, res) => {
+  const series = getSeries(req.params.id);
+  if (!series) return sendError(res, 404, 'Series not found');
+  const found = findPage(series, req.params.pageId);
+  if (!found) return sendError(res, 404, 'Page not found');
+  const dnaKey = seriesDnaKey(series);
+  const { chapter: targetChapter, page: targetPage } = found;
+
+  const schema = z.object({
+    instruction: z.string().min(1).max(2000),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, parsed.error.message);
+  if (targetPage.status === 'generating') return sendError(res, 409, '该页正在生成中，请稍候');
+  updatePage(series.id, targetChapter.id, targetPage.id, { status: 'generating', errorMessage: undefined });
+
+  let taskId: string;
+  try {
+    taskId = runTask(`page:${targetPage.id}`, 'page-rewrite', async () => {
+      try {
+        // 1) 文字模型按用户指令重写分镜
+        const rewritePrompt = `用户在修改第 ${targetPage.pageNumber} 页（章节：${targetChapter.title}）。\n\n用户原始内容：\n页标题：${targetPage.title}\n场景：${targetPage.sceneDescription}\n当前分镜：\n${targetPage.panels.map(p => `${p.index}. [${p.camera || 'mid'}] ${p.description}${p.dialogue ? `（对白："${p.dialogue}"）` : ''} → 角色：${p.characterIds.join(',') || '无'}${p.extraCharacters?.length ? `；配角：${p.extraCharacters.map(e => e.name).join(',')}` : ''}`).join('\n')}\n\n用户的新指令：${parsed.data.instruction}\n\n请输出改写后的页面（保留原分镜数量或合理调整）。${STORYBOARD_RULES}\ncharacterIds 必须从下列 ID 中选：${series.characters.map(c => `${c.id}=${c.name}`).join('，')}。`;
+        const rewritten = await callStructuredJson<z.infer<typeof PanelBreakdownZ>>(
+          rewritePrompt,
+          '你是一位漫画编剧。用户要修改当前页，请根据指令输出新的分镜描述。严格输出 JSON。',
+          PageRewriteSchema as Record<string, unknown>,
+          {
+            dnaKey,
+            temperature: 0.8,
+            logKind: 'page-rewrite',
+            logMeta: { seriesId: series.id, pageId: targetPage.id, instruction: parsed.data.instruction },
+            validate: raw => PanelBreakdownZ.parse(raw),
+          },
+        );
+        const validIds = new Set(series.characters.map(c => c.id));
+        const panels = sanitizePanels(rewritten.panels, validIds, `rewrite 第${targetPage.pageNumber}页`);
+        if (!panels) throw new Error('模型未返回有效分镜');
+        const allCharIds = new Set<string>();
+        panels.forEach(p => p.characterIds.forEach(id => allCharIds.add(id)));
+        updatePage(series.id, targetChapter.id, targetPage.id, {
+          title: rewritten.title || targetPage.title,
+          sceneDescription: rewritten.sceneDescription,
+          panels,
+          characterIds: Array.from(allCharIds),
+        });
+        // 2) 按新分镜重新出图
+        const fresh = getSeries(series.id);
+        const freshFound = fresh ? findPage(fresh, targetPage.id) : null;
+        if (!freshFound) throw new Error('页面数据丢失');
+        const paths = await generatePanelImages(series, rewritten.sceneDescription, panels, `rewrite 第${targetPage.pageNumber}页`, dnaKey);
+        const updatedPanels = [...panels]
+          .sort((a, b) => a.index - b.index)
+          .map((p, i) => ({ ...p, imageUrl: paths[i] }));
+        const updated = updatePage(series.id, targetChapter.id, targetPage.id, {
+          panels: updatedPanels,
+          status: 'done',
+        });
+        return { page: updated };
+      } catch (e: any) {
+        updatePage(series.id, targetChapter.id, targetPage.id, { status: 'error', errorMessage: e.message });
+        throw e;
+      }
+    });
+  } catch (e: any) {
+    if (e instanceof DuplicateTaskError) {
+      updatePage(series.id, targetChapter.id, targetPage.id, { status: targetPage.status, errorMessage: undefined });
+      return sendError(res, 409, '该页正在生成中，请稍候');
+    }
+    updatePage(series.id, targetChapter.id, targetPage.id, { status: 'error', errorMessage: e.message });
+    return sendError(res, 500, e.message || 'Failed to start task');
+  }
+  res.json({ taskId });
+});
+
+// ========== 单分镜自然语言改写 ==========
+
+const PanelRewriteSchema = {
+  type: 'object',
+  properties: {
+    description: { type: 'string' },
+    dialogue: { type: 'string' },
+    camera: { type: 'string', description: '镜头景别+角度：远景/全景/中景/中近景/近景/特写' },
+    characterIds: { type: 'array', items: { type: 'string' } },
+    extraCharacters: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          appearance: { type: 'string' },
+        },
+        required: ['name', 'appearance'],
+      },
+      description: '不在角色库中的一次性配角（画面里出现的每个人都要登记）',
+    },
+  },
+  required: ['description'],
+} as const;
+
+router.post('/series/:id/pages/:pageId/panels/:panelIndex/rewrite', async (req, res) => {
+  const series = getSeries(req.params.id);
+  if (!series) return sendError(res, 404, 'Series not found');
+  const found = findPage(series, req.params.pageId);
+  if (!found) return sendError(res, 404, 'Page not found');
+  const dnaKey = seriesDnaKey(series);
+  const { chapter: targetChapter, page: targetPage } = found;
+
+  const panelIndex = Number(req.params.panelIndex);
+  const targetPanel = targetPage.panels.find(p => p.index === panelIndex);
+  if (!targetPanel) return sendError(res, 404, 'Panel not found');
+
+  const schema = z.object({ instruction: z.string().min(1).max(2000) });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, 400, parsed.error.message);
+  if (targetPage.status === 'generating') return sendError(res, 409, '该页正在生成中，请稍候');
+
+  let taskId: string;
+  try {
+    taskId = runTask(`page:${targetPage.id}`, 'panel-rewrite', async () => {
+      try {
+        // 1) 文字模型重写这一格的描述
+        const rewritePrompt = `当前是漫画第 ${targetPage.pageNumber} 页（章节：${targetChapter.title}）中的第 ${panelIndex} 格。\n\n原描述：${targetPanel.description}\n原镜头：${targetPanel.camera || 'mid'}\n${targetPanel.dialogue ? `原对白："${targetPanel.dialogue}"` : ''}\n\n用户的新指令：${parsed.data.instruction}\n\n请改写这一格的画面描述、镜头（camera）、对白、出场角色（characterIds 仅从下列 ID 中选：${series.characters.map(c => `${c.id}=${c.name}`).join('，')}；画面里出现的一次性配角放 extraCharacters）。严格输出 JSON。`;
+        const rewritten = await callStructuredJson<z.infer<typeof PanelRewriteZ>>(
+          rewritePrompt,
+          '你是一位漫画分镜师。用户要修改单格画面，请输出新的描述。严格输出 JSON。',
+          PanelRewriteSchema as Record<string, unknown>,
+          {
+            dnaKey,
+            temperature: 0.8,
+            logKind: 'panel-rewrite',
+            logMeta: { seriesId: series.id, pageId: targetPage.id, panelIndex, instruction: parsed.data.instruction },
+            validate: raw => PanelRewriteZ.parse(raw),
+          },
+        );
+        const validIds = new Set(series.characters.map(c => c.id));
+        const okIds = Array.from(new Set(rewritten.characterIds || [])).filter(id => validIds.has(id));
+        if (okIds.length < (rewritten.characterIds || []).length) {
+          console.warn(`[series-routes] panel-rewrite：过滤 ${(rewritten.characterIds || []).length - okIds.length} 个幻觉角色 ID`);
+        }
+        // 2) 重新出这一格的图（与整页出图共用 prompt 构建，避免逻辑漂移）
+        if (!series.worldview) throw new Error('请先生成世界观，再生成图像');
+        const config = getConfig().image;
+        const imageProvider = getImageProvider(config);
+        const { refImages, charDescLines, boundCharNames, anchorText } = collectPanelCharacterRefs(series, {
+          characterIds: okIds,
+          camera: rewritten.camera || targetPanel.camera,
+        });
+        const styleRefsRewrite = getStyleRefs();
+        const newExtras = (rewritten.extraCharacters ?? []).filter(ec => ec?.name?.trim() && ec?.appearance?.trim());
+        const prompt = buildPanelImagePrompt({
+          style: series.worldview.artStyle,
+          mood: series.worldview.paletteMood,
+          sceneDescription: targetPage.sceneDescription,
+          description: rewritten.description,
+          charDescLines,
+          boundCharNames,
+          anchorText,
+          extraCharacters: newExtras.length > 0 ? newExtras : targetPanel.extraCharacters,
+        }) + styleRefsRewrite.note;
+        const allRefsRewrite = [...refImages, ...styleRefsRewrite.images];
+        const finalReq = withDnaImagePrompt({
+          prompt,
+          referenceImages: allRefsRewrite.length > 0 ? allRefsRewrite : undefined,
+          aspectRatio: '3:4',
+        }, { dnaKey, purpose: 'panel' });
+        const img = await imageProvider.generateImage(config, finalReq);
+        logGeneration('panel-image', { seriesId: series.id, ctx: `panel-rewrite p${targetPage.pageNumber}#${panelIndex}`, model: config.model, prompt: finalReq.prompt, promptLen: finalReq.prompt.length, refCount: refImages.length, styleRefCount: styleRefsRewrite.images.length, dnaKey });
+        // 3) 替换原 panel
+        const updatedPanels = targetPage.panels.map(p =>
+          p.index === panelIndex
+            ? {
+              ...p,
+              description: rewritten.description,
+              dialogue: rewritten.dialogue || '',
+              characterIds: okIds,
+              camera: rewritten.camera || p.camera,
+              extraCharacters: newExtras.length > 0 ? newExtras : p.extraCharacters,
+              imageUrl: saveDataUrlImage(img.image),
+            }
+            : p,
+        );
+        const updated = updatePage(series.id, targetChapter.id, targetPage.id, { panels: updatedPanels, status: 'done', errorMessage: undefined });
+        const panel = updatedPanels.find(p => p.index === panelIndex);
+        return { panel };
+      } catch (e: any) {
+        throw new Error(e.message || 'Panel rewrite failed');
+      }
+    });
+  } catch (e: any) {
+    if (e instanceof DuplicateTaskError) return sendError(res, 409, '该页正在处理中，请稍候');
+    return sendError(res, 500, e.message || 'Failed to start task');
+  }
+  res.json({ taskId });
+});
+
+// ========== 一键续写：基于已完成的页自动生成下一个空白页的草稿 ==========
+
+router.post('/series/:id/pages/:pageId/continue', async (req, res) => {
+  const series = getSeries(req.params.id);
+  if (!series) return sendError(res, 404, 'Series not found');
+  const found = findPage(series, req.params.pageId);
+  if (!found) return sendError(res, 404, 'Page not found');
+  const dnaKey = seriesDnaKey(series);
+  const { chapter: targetChapter, page: targetPage } = found;
+
+  // 找全局顺序的下一页（先当前章节，再下一章节）
+  const flat: { ch: Chapter; p: SeriesPage }[] = [];
+  for (const ch of iterAllChapters(series)) for (const p of ch.pages) flat.push({ ch, p });
+  const idx = flat.findIndex(x => x.p.id === targetPage.id);
+  const next = flat[idx + 1];
+  if (!next) return sendError(res, 400, '已经是最后一页，没有可续写的下一页');
+  if (next.p.status === 'done' || next.p.panels.length > 0) {
+    return sendError(res, 400, '下一页已经有内容，请直接编辑或重生成');
+  }
+
+  try {
+    // P2-9：跨章收集最近 3 页（含当前页）作为上下文
+    const contextText = buildRecentContext(series, targetPage.id, true, 3);
+    const charLib = series.characters.map(c => {
+      const brief = (c.roleInStory || c.description || c.appearance || '').replace(/\s+/g, ' ').slice(0, 40);
+      return `- id=${c.id} 名字=${c.name}（${c.role}）：${brief}`;
+    }).join('\n');
+    const continuePrompt = `你正在为连载漫画《${series.title}》的《${next.ch.title}》续写新一批内容。\n\n世界观：${series.worldview?.era} / ${series.worldview?.artStyle}\n本话剧情：${next.ch.title} - ${next.ch.summary}\n\n角色库（主要角色）：\n${charLib}\n\n前文剧情（按顺序，保持连续，不要重复已发生的情节）：\n${contextText}\n\n现在要写本话的第 ${next.p.pageNumber} 批。请输出恰好 6 个分镜（每批固定 6 格），让故事自然承接。${STORYBOARD_RULES}\ncharacterIds 仅从上
+述 ID 中选。`;
+    const breakdown = await callStructuredJson<z.infer<typeof PanelBreakdownZ>>(
+      continuePrompt,
+      '你是一位漫画编剧。请输出严格的 JSON 格式。',
+      PanelBreakdownSchema as Record<string, unknown>,
+      {
+        dnaKey,
+        temperature: 0.8,
+        logKind: 'continue',
+        logMeta: { seriesId: series.id, pageId: next.p.id },
+        validate: raw => {
+          const v = PanelBreakdownZ.parse(raw);
+          if (v.panels.length !== 6) throw new Error(`本批必须恰好 6 格，模型输出了 ${v.panels.length} 格，请重新输出恰好 6 格。`);
+          return v;
+        },
+      },
+    );
+    const validIds = new Set(series.characters.map(c => c.id));
+    const panels = sanitizePanels(breakdown.panels, validIds, `continue 第${next.p.pageNumber}页`);
+    if (!panels) return sendError(res, 502, '模型未返回有效分镜，请重试');
+    const allCharIds = new Set<string>();
+    panels.forEach(p => p.characterIds.forEach(id => allCharIds.add(id)));
+    const updated = updatePage(series.id, next.ch.id, next.p.id, {
+      title: breakdown.title || next.p.title,
+      sceneDescription: breakdown.sceneDescription,
+      panels,
+      characterIds: Array.from(allCharIds),
+      status: 'draft',
+    });
+    res.json({ page: updated });
+  } catch (e: any) {
+    sendError(res, 502, e.message || 'Continue generation failed');
+  }
+});
+
+export default router;

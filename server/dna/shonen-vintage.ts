@@ -1,4 +1,4 @@
-// @dna-checksum: 7ccbd1d257b22fb84048a5c76cdf40f96c04fcd8bc63ef6796929dc802e5b506
+// @dna-checksum: f3ba763424e6f25e10c2b29bf6d5e55154abc0fedff7e5eab007927e2bc29f53
 /**
  * ═══════════════════════════════════════════════════════════════════════════
  *  DNA 预设二：80-90s 复古少年漫画（热血/速度感/友情/成长）
@@ -152,6 +152,123 @@ NOT a literary graphic novel. NOT a quiet indie comic.
 THIS IS a single frame from an energetic 80s-90s shonen manga
 that the reader wants to read ten more pages of. Make the
 reader feel their own heart pounding.
+`;
+
+/**
+ * 角色参考图专用 system prompt（character reference sheet）。
+ *
+ * 与 IMAGE_SYSTEM_PROMPT 的关键差异：
+ *  - 角色图是「白底中性模板」——只画一个角色，不画场景
+ *  - IMAGE_SYSTEM_PROMPT 里 [SCENE — STAGE-LIKE, ENERGY-FILLED] 段落列举了大量
+ *    学校体育馆、屋顶、河岸、车站等场景例子，会把场景画到角色图上
+ *  - 本字段只保留 [TONE / LINEWORK / FACES / CLOTHING / PALETTE / LIGHTING] 这六个
+ *    跟角色外观相关的段落，跳过 [SCENE / COMPOSITION]，确保角色图是中性立绘
+ *  - 风格色调仍然保留（少年漫画的明黄 / 橘红 / 钢笔线稿 / 饱和大色块），
+ *    确保角色模板与后续分镜图风格一致
+ *
+ * 注意：与 New Yorker / Cinematic 不同，少年漫画的角色参考图**允许中性白底**，
+ * 这一点是妥协（这个 DNA 的 VISUAL_FORBIDDEN 里有「纯白底」，但角色参考图是模板，
+ * 白底是为了让分镜图能自由发挥场景与背景）。
+ */
+export const IMAGE_CHARACTER_SYSTEM_PROMPT = `
+You are drawing a single character reference sheet for a classic
+1980s-1990s shonen (boys') manga in the spirit of SLAM DUNK,
+Yu Yu Hakusho, Rurouni Kenshin, Dragon Ball. The portrait will
+be reused as the visual anchor for every page the character
+appears on, so it must be neutral, repeatable, and consistent —
+NOT a moment captured in an action scene.
+
+[TONE — CHARACTER PORTRAIT, NOT ACTION SCENE]
+
+This is a neutral character portrait. The character is presented
+as themselves, in their characteristic pose / expression / outfit,
+on a plain background. This is NOT an action frame, NOT a panel
+in the middle of a battle. The character could be lifted out of
+any scene in this manga and re-placed into another — that's the
+point.
+
+[LINEWORK]
+
+Bold, confident, slightly variable pen line. The outer contour
+of the figure can be thicker (1.0-1.5mm equivalent) than the
+interior detail lines. Speed lines, impact lines, and
+concentration lines are NOT appropriate here (this is a calm
+portrait, not an action shot) — save them for the panel art.
+The overall feel is "inked by a confident manga assistant",
+NOT "drawn by a computer".
+
+[FACES — EXPRESSIVE BUT IN A STILL FRAME]
+
+Faces in shonen have LICENSED exaggeration, but in a still
+character portrait the default is the character's CALM face —
+focused, slightly determined, eyes medium (not wide). The
+default portrait expression should NOT include shock stars,
+anger veins, or sweat drops — those are action-shot tools,
+saved for the panel art. The face should be a TOOL the reader
+can recognize as "this character at rest, before the storm".
+
+Specifically:
+  - Eyes: medium size — not "anime big", not "Western round".
+    Single eyelid or shallow double eyelid both fine.
+    Shonen eyes widen in dramatic moments, but in a portrait
+    they are at base size. NO sparkles, NO anime shine.
+  - Eyebrows: low and focused (the resting shonen brow), NOT
+    shaped, NOT thin, NOT surprised.
+  - Nose: simple, ordinary. In an extreme shot the nose can
+    become a single line, but in a portrait it has full shape.
+  - Mouth: closed or slightly open in a confident half-smirk.
+    NOT shouting, NOT crying.
+  - Jaw: ordinary. Boys 15-19 unless the story says otherwise.
+  - Skin: warm and slightly tan (NOT porcelain, NOT grey).
+    Skin looks healthy, sun-exposed. NO visible pores, NO
+    heavy blemishes, but allow a slight sweat sheen if it
+    fits the character.
+  - Hair: iconic and slightly exaggerated. Spiky, swept-back,
+    long-fringe, side-part. NOT anime gravity-defying. NOT
+    realistic barbershop. A MIDDLE GROUND: a hair shape the
+    reader can sketch from memory. Hair color is one of the
+    classic shonen palette colors (black, dark brown, dark
+    auburn, platinum blonde, etc.) — bold and readable.
+
+[CLOTHING]
+
+Genre-appropriate clothing for the character:
+  - School uniforms (gakuran / sailor)
+  - Basketball / baseball / soccer jerseys
+  - Training wear, gym clothes
+  - Band t-shirts, hoodies
+  - Sneakers, wristbands, headbands, sweat towels
+Clothing should LOOK like it has been worn hard: slightly
+wrinkled, sweat-marked. NO logos visible unless the genre
+specifically calls for brand recognition.
+
+[PALETTE — BRIGHT, WARM, SATURATED]
+
+Background: clean white / paper tone (NOT pure cold grey, NOT
+muted earth). Skin tones: warm tan, sun-flushed, not pale.
+Accent colors used BOLDLY in the clothing: school uniform navy,
+jersey red, training yellow, court green, ball orange.
+Skin and hair colors are vivid and clear — the character
+should be readable at a glance.
+
+[LIGHTING]
+
+Even, neutral front light. This is a reference portrait, not
+an action shot — the lighting is calm and reveals the
+character clearly. Save dramatic backlight, sunset rim light,
+gym fluorescents, etc. for the panel art.
+
+[WHAT THIS IS NOT]
+
+NOT photorealistic. NOT watercolor. NOT minimalist.
+NOT New Yorker spot illustration. NOT Tomine-style hairlines.
+NOT a literary graphic novel. NOT a quiet indie comic.
+NOT set in any specific location (no gym, no rooftop, no
+train station visible in the background).
+
+THIS IS a single character reference portrait that will be
+reused as the visual anchor for every page the character
+appears on. It is recognizable, repeatable, and consistent.
 `;
 
 export const CHARACTER_HARD_CONSTRAINTS = `

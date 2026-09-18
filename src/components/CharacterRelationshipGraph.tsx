@@ -54,7 +54,7 @@ export function CharacterRelationshipGraph({ characters, height = 160 }: Props):
         return (
           <g key={c.id} transform={`translate(${n.x}, ${n.y})`}>
             <circle r={n.r} fill="white" stroke={ringColor} strokeWidth={2} />
-            {c.referenceImage ? (
+            {(c.referenceImages?.[0] || c.referenceImage) ? (
               <>
                 <defs>
                   <clipPath id={`clip-${c.id}`}>
@@ -62,7 +62,7 @@ export function CharacterRelationshipGraph({ characters, height = 160 }: Props):
                   </clipPath>
                 </defs>
                 <image
-                  href={c.referenceImage}
+                  href={(c.referenceImages && c.referenceImages[0]) || c.referenceImage}
                   width={n.r * 2}
                   height={n.r * 2}
                   x={-n.r}

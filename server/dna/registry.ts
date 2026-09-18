@@ -26,6 +26,7 @@ import { fileURLToPath } from 'url';
 import * as newYorkerNoir from './new-yorker-noir.js';
 import * as shonenVintage from './shonen-vintage.js';
 import * as cinematicRealism from './cinematic-realism.js';
+import * as graphicNovelInk from './graphic-novel-ink.js';
 import { verifyDnaSource, type DnaVerifyReport } from './checksum.js';
 
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
@@ -39,11 +40,11 @@ const REPO_ROOT = join(SERVER_DIR, '..', '..');
  * 系统支持的 DNA key 列表（单一事实来源）。
  * 顺序即为前端 UI 展示顺序。第一个即为默认值。
  */
-export const DNA_KEYS = ['new-yorker-noir', 'shonen-vintage', 'cinematic-realism'] as const;
+export const DNA_KEYS = ['graphic-novel-ink', 'new-yorker-noir', 'shonen-vintage', 'cinematic-realism'] as const;
 export type DnaKey = typeof DNA_KEYS[number];
 
 /** 默认 DNA key。新系列、config 中未指定时使用。 */
-export const DEFAULT_DNA_KEY: DnaKey = 'new-yorker-noir';
+export const DEFAULT_DNA_KEY: DnaKey = 'graphic-novel-ink';
 
 /**
  * 单个 DNA 预设对外暴露的统一形状（编译期强约束）。
@@ -63,6 +64,17 @@ export interface DnaPreset {
   VISUAL_FORBIDDEN: string[];
   IMAGE_NEGATIVE_PROMPT: string;
   IMAGE_SYSTEM_PROMPT: string;
+  /**
+   * 角色参考图专用 system prompt —— 喂给生成"角色设定图"（character reference sheet）。
+   *
+   * 为什么需要这个独立字段：
+   *  - 角色图是白底中性模板，要求模型只画一个角色、不画场景
+   *  - 而 IMAGE_SYSTEM_PROMPT 里通常有大量场景描写（咖啡馆、街道、公寓……），
+   *    会导致模型把场景画到角色图上
+   *  - 所以 character 模式用本字段（只讲面部 / 肤质 / 服装风格 / 色调，不讲场景），
+   *    scene 模式继续用 IMAGE_SYSTEM_PROMPT
+   */
+  IMAGE_CHARACTER_SYSTEM_PROMPT: string;
   CHARACTER_HARD_CONSTRAINTS: string;
   COMPOSITION_HARD_CONSTRAINTS: string;
   SCENE_HARD_CONSTRAINTS: string;
@@ -78,6 +90,12 @@ export interface DnaPreset {
 type DnaSource = Omit<DnaPreset, 'key' | 'name' | 'tagline' | 'genres'>;
 
 const META: Record<DnaKey, { name: string; tagline: string; genres: string[]; source: DnaSource }> = {
+  'graphic-novel-ink': {
+    name: '排线文学·Graphic Novel',
+    tagline: '欧美成人写实 Graphic Novel——钢笔排线 × 4-5 色有限色板 × 都市文学',
+    genres: ['都市情感', '家庭剧', '职场现实', '公众号长漫'],
+    source: graphicNovelInk as unknown as DnaSource,
+  },
   'new-yorker-noir': {
     name: '纽约客·城市叙事',
     tagline: 'New Yorker 单幅 × Tomine 都市写实 × Graphic Novel 文学气质',
@@ -136,6 +154,7 @@ export function listDna(): Array<Pick<DnaPreset, 'key' | 'name' | 'tagline' | 'g
  */
 export function verifyAllDna(): DnaVerifyReport[] {
   const files: Array<{ key: DnaKey; path: string }> = [
+    { key: 'graphic-novel-ink', path: join(FILES_DIR, 'dna', 'graphic-novel-ink.ts') },
     { key: 'new-yorker-noir', path: join(FILES_DIR, 'dna', 'new-yorker-noir.ts') },
     { key: 'shonen-vintage', path: join(FILES_DIR, 'dna', 'shonen-vintage.ts') },
     { key: 'cinematic-realism', path: join(FILES_DIR, 'dna', 'cinematic-realism.ts') },
@@ -163,6 +182,7 @@ export function verifyAllDna(): DnaVerifyReport[] {
 
 /** 前端 .md 镜像路径列表（开发时核对）。 */
 export const DNA_DOCS_PATHS: Record<DnaKey, string> = {
+  'graphic-novel-ink': join(REPO_ROOT, 'docs', 'style-dna', 'graphic-novel-ink.md'),
   'new-yorker-noir': join(REPO_ROOT, 'docs', 'style-dna', 'new-yorker-noir.md'),
   'shonen-vintage': join(REPO_ROOT, 'docs', 'style-dna', 'shonen-vintage.md'),
   'cinematic-realism': join(REPO_ROOT, 'docs', 'style-dna', 'cinematic-realism.md'),

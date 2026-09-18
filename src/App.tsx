@@ -18,7 +18,7 @@ function AppInner(): React.ReactElement {
   const { config, dnaList, updateConfig, isModalOpen, setIsModalOpen, saveToServer, isLoading: isModelConfigLoading, error: modelConfigError, clearError } = useModelConfig();
 
   return (
-    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--paper)' }}>
+    <div className="app-shell" style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--paper)' }}>
       <AgentWorkbench
         language={language}
         setLanguage={setLanguage}

@@ -83,3 +83,13 @@ export function getTask(id: string): TaskState | undefined {
   const { key: _key, ...state } = t as TaskState & { key?: string };
   return state;
 }
+
+/** 调试：列出所有内存中的 task（不含内部 key）。仅本地使用。 */
+export function listTasks(): TaskState[] {
+  const out: TaskState[] = [];
+  for (const t of tasks.values()) {
+    const { key: _key, ...state } = t as TaskState & { key?: string };
+    out.push(state);
+  }
+  return out;
+}

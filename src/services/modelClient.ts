@@ -87,6 +87,8 @@ export async function generateImage(
 export async function fetchServerConfig(): Promise<{
   text: ModelConfig['text'];
   image: ModelConfig['image'];
+  // 2026-09-03：vision 字段也带回前端（apiKey 已被服务端掩码）。
+  vision: ModelConfig['vision'];
   dnaKey: ModelConfig['dnaKey'];
 }> {
   return getJson('/api/config');

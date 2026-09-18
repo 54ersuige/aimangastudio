@@ -5,10 +5,13 @@
  *   - 用户在聊天框里的每条消息是一条"指令"。Agent 解析后调用现有的
  *     SeriesContext API（已经在用），并把阶段性产物以"内嵌审核卡"形式
  *     推回聊天。
- *   - 4 个关键节点（世界观 / 角色 / 章节大纲 / 逐页分镜）必须停下来
+ *   - 4 个关键节点（世界观 / 角色 / 话目大纲 / 逐话分镜）必须停下来
  *     等用户确认；其他过程自动推进。
- *   - 用户可以随时输入"修改为..."、"重新生成"、"删除 X"、"重新写一遍
- *     第 3 章第 2 页" 等自然语言指令；引擎做最宽松的语义匹配。
+ *   - 用户可以随时输入"修改为..."、"重新生成"、"删除 X"、"出图第 3 话"、
+ *     "重出第 5 格" 等自然语言指令；引擎做最宽松的语义匹配。
+ *   - 2026-09-02 对齐话级模型：发布/创作最小单位是「话」（≈15 格），
+ *     page 只是内部批次。助手话术与左侧工作台（季蓝图→季骨架→逐季话目→逐话出图）
+ *     完全同构，所有面向用户的文案不再出现"页"。
  */
 
 import type {
@@ -18,6 +21,7 @@ import type {
   Worldview,
   SeriesCharacter,
   Chapter,
+  Arc,
   SeriesPage,
 } from '../types';
 import {
@@ -85,7 +89,6 @@ function detectMutation(text: string): { action: 'delete' | 'rename'; target?: s
 // ──────────────────────────────────────────────────────────────────────────
 // 引擎主类
 // ──────────────────────────────────────────────────────────────────────────
-
 export class AgentEngine {
   constructor() {
     // 无参数；deps 通过 setDeps() 注入（getter 形式避免闭包陷阱）。
@@ -109,6 +112,12 @@ export class AgentEngine {
   private deleteCharacter: (id: string) => Promise<void>;
   private selectPage: (id: string | null) => void;
   private getSelectedPageId: () => string | null;
+  // —— 话级模型（2026-09-02） ——
+  private genArcs: () => Promise<Arc[] | null>;
+  private genArcChapters: (arcId: string, opts?: { targetPageCount?: number; hint?: string }) => Promise<Chapter[] | null>;
+  private generatePanel: (pageId: string, panelIndex: number) => Promise<SeriesPage | null>;
+  private selectEpisode: (chapterId: string | null) => void;
+  private getSelectedEpisodeId: () => string | null;
 
   /** 一组 dep 函数。React 层每次重渲染都重新构造 deps 并调用此方法。 */
   setDeps(deps: {
@@ -126,6 +135,11 @@ export class AgentEngine {
     deleteCharacter: (id: string) => Promise<void>;
     selectPage: (id: string | null) => void;
     getSelectedPageId: () => string | null;
+    genArcs: () => Promise<Arc[] | null>;
+    genArcChapters: (arcId: string, opts?: { targetPageCount?: number; hint?: string }) => Promise<Chapter[] | null>;
+    generatePanel: (pageId: string, panelIndex: number) => Promise<SeriesPage | null>;
+    selectEpisode: (chapterId: string | null) => void;
+    getSelectedEpisodeId: () => string | null;
   }) {
     this.getSeries = deps.getSeries;
     this.ensureSeries = deps.ensureSeries;
@@ -141,6 +155,11 @@ export class AgentEngine {
     this.deleteCharacter = deps.deleteCharacter;
     this.selectPage = deps.selectPage;
     this.getSelectedPageId = deps.getSelectedPageId;
+    this.genArcs = deps.genArcs;
+    this.genArcChapters = deps.genArcChapters;
+    this.generatePanel = deps.generatePanel;
+    this.selectEpisode = deps.selectEpisode;
+    this.getSelectedEpisodeId = deps.getSelectedEpisodeId;
   }
 
   // ── 订阅 ──
@@ -152,6 +171,47 @@ export class AgentEngine {
 
   getMessages(): ChatMessage[] { return this.messages; }
   getStage(): AgentStage { return this.stage; }
+
+  /** 兼容 arcs（新结构）+ chapters（旧结构）的话目平铺。 */
+  private flattenEpisodes(s: Series | null): Chapter[] {
+    if (!s) return [];
+    return s.arcs && s.arcs.length > 0 ? s.arcs.flatMap(a => a.chapters ?? []) : (s.chapters ?? []);
+  }
+
+  /** 根据季蓝图/已有结构计算推荐话数（每话一件完整的事，约 15 格）。 */
+  private getEpisodePlan(): { totalEpisodes: number; source: 'arcBlueprints' | 'arcs' | 'chapters' | 'default' } {
+    const s = this.getSeries();
+    if (!s) return { totalEpisodes: 6, source: 'default' };
+
+    if (s.worldview?.arcBlueprints && s.worldview.arcBlueprints.length > 0) {
+      return { totalEpisodes: s.worldview.arcBlueprints.reduce((sum, a) => sum + a.plannedChapterCount, 0), source: 'arcBlueprints' };
+    }
+    if (s.arcs && s.arcs.length > 0) {
+      const planned = s.arcs.reduce((sum, a) => sum + (a.plannedChapterCount ?? 0), 0)
+        || s.arcs.reduce((sum, a) => sum + a.chapters.length, 0);
+      return { totalEpisodes: planned, source: 'arcs' };
+    }
+    if (s.chapters && s.chapters.length > 0) {
+      return { totalEpisodes: s.chapters.length, source: 'chapters' };
+    }
+    return { totalEpisodes: 6, source: 'default' };
+  }
+
+  /** 话级进度汇总：共 X 话 / Y 格 / 已生成 Z 格。 */
+  private getEpisodeProgress(): { episodes: Chapter[]; totalPanels: number; donePanels: number } {
+    const episodes = this.flattenEpisodes(this.getSeries());
+    let totalPanels = 0;
+    let donePanels = 0;
+    for (const ch of episodes) {
+      for (const p of ch.pages) {
+        for (const pn of p.panels) {
+          totalPanels++;
+          if (pn.imageUrl) donePanels++;
+        }
+      }
+    }
+    return { episodes, totalPanels, donePanels };
+  }
 
   /** 切换系列时重置内部状态。 */
   reset(): void {
@@ -190,18 +250,35 @@ export class AgentEngine {
         agentMsg(`欢迎回到 **${s.title}**。世界观已就绪，还差角色设定 —— 回复「**开始**」我就生成核心角色（主角 + 配角 + 反派），也可以先说说你的要求。`),
       ];
       this.emit();
-    } else if (s.chapters.length === 0) {
+    } else if (this.flattenEpisodes(s).length === 0) {
       this.stage = 'reviewing_chapters';
+      const plan = this.getEpisodePlan();
+      let hint = '';
+      if (plan.source === 'arcBlueprints' && s.worldview?.arcBlueprints) {
+        const arcSummary = s.worldview.arcBlueprints.map(a => `${a.title}（${a.plannedChapterCount} 话）`).join('、');
+        hint = `你的季蓝图规划了 ${s.worldview.arcBlueprints.length} 季共 **${plan.totalEpisodes} 话**（${arcSummary}），每话一件完整的事、约 15 格。`;
+      } else if (plan.source === 'arcs' && s.arcs) {
+        hint = `已规划 ${s.arcs.length} 季共 **${plan.totalEpisodes} 话**，每话一件完整的事、约 15 格。`;
+      } else {
+        hint = `推荐先规划 **${plan.totalEpisodes} 话** 左右（每话一件完整的事，约 15 格）。`;
+      }
       this.messages = [
-        agentMsg(`角色已确认。请告诉我你的总页数（推荐 8-20 页），或者直接说「开始拆分章节」。我会按页数自动拆章节。`),
+        agentMsg(`角色已确认 ✅。接下来规划话目：${hint}\n\n直接说「**开始拆分**」我就按规划拆出每话大纲；也可以说「**拆 8 话**」指定话数。`),
       ];
       this.emit();
     } else {
       this.stage = 'producing_pages';
+      const { episodes, totalPanels, donePanels } = this.getEpisodeProgress();
+      const missing = totalPanels - donePanels;
+      const curIdx = episodes.findIndex(c => c.id === this.getSelectedEpisodeId());
       this.messages = [
-        agentMsg(`欢迎回到 **${s.title}**。所有准备工作已完成，可以开始逐页生成了。\n` +
-          '从左侧选一页，告诉我「拆解分镜」或「整页出图」，我都能执行。\n' +
-          '也可以说「全部自动跑」让我按顺序把所有草稿出完。'),
+        agentMsg(`欢迎回到 **${s.title}**。目前共 **${episodes.length}** 话、**${totalPanels}** 格，已生成 **${donePanels}** 格${missing > 0 ? `，还缺 **${missing}** 格` : '（全部完成 🎉）'}。${curIdx >= 0 ? `左侧正看着第 ${curIdx + 1} 话《${episodes[curIdx].title}》。` : ''}\n` +
+          '可以对我说：\n' +
+          '• 「**出图第 X 话**」—— 补齐该话缺图（已有图不会重画）\n' +
+          '• 「**自动跑**」—— 从当前话起依次跑完全部\n' +
+          '• 「**重出第 N 格**」—— 重画当前话第 N 格\n' +
+          '• 「**续写本话**」—— 基于剧情追加约 6 格\n' +
+          '• 「**跳到第 X 话**」—— 切换左侧话卡片'),
       ];
       this.emit();
     }
@@ -277,17 +354,41 @@ export class AgentEngine {
         return;
       }
       case 'reviewing_chapters': {
+        const hasChapters = this.flattenEpisodes(this.getSeries()).length > 0;
         const intent = detectIntent(trimmed);
+        // 有话目时「通过」= 确认大纲进入逐话；还没话目时「通过/开始拆分」= 先拆
         if (intent.approve) {
-          await this.approveChapters();
+          if (hasChapters) {
+            await this.approveChapters();
+          } else {
+            await this.runGenerateChapters();
+          }
           return;
         }
         if (intent.regenerate) {
-          await this.runGenerateChapters(this.parsePageCount(trimmed) ?? 12);
+          if (hasChapters) {
+            this.messages.push(agentMsg('好，重新规划话目大纲。'));
+            this.emit();
+          }
+          await this.runGenerateChapters();
           return;
         }
-        const pc = this.parsePageCount(trimmed);
-        await this.runGenerateChapters(pc ?? 12);
+        // 「开始拆分 / 开始」
+        if (/^(开始拆分|开始|拆分|拆章节|生成话目|go|start)$/i.test(trimmed)) {
+          await this.runGenerateChapters();
+          return;
+        }
+        // 指定话数（"拆 8 话"）；有话目时自由文本默认当作确认进入逐话
+        const epCount = this.parseEpisodeCount(trimmed);
+        if (epCount) {
+          await this.runGenerateChapters(epCount);
+          return;
+        }
+        if (hasChapters) {
+          await this.approveChapters();
+          return;
+        }
+        await this.runGenerateChapters();
         return;
       }
       case 'producing_pages': {
@@ -295,27 +396,31 @@ export class AgentEngine {
         return;
       }
       default:
-        this.messages.push(agentMsg('收到。你可以输入「开始」让我带你从头创建；或点击左侧项目继续。'));
+        this.messages.push(agentMsg('收到。可以输入「开始」让我带你从头创建；或点击左侧项目继续。'));
         this.emit();
     }
   }
 
   // ── 用户快捷按钮 ──
+  /** 「通过」：有可审阅产物时确认进入下一阶段；无产物时按规划开始拆分。 */
   async approveCurrent(): Promise<void> {
     if (this.stage === 'reviewing_worldview') return this.approveWorldview();
     if (this.stage === 'reviewing_characters') return this.approveCharacters();
-    if (this.stage === 'reviewing_chapters') return this.approveChapters();
+    if (this.stage === 'reviewing_chapters') {
+      if (this.flattenEpisodes(this.getSeries()).length > 0) return this.approveChapters();
+      return this.runGenerateChapters();
+    }
   }
   async regenerateCurrent(): Promise<void> {
     if (this.stage === 'reviewing_worldview') return this.runGenerateWorldview();
     if (this.stage === 'reviewing_characters') return this.runGenerateCharacters();
-    if (this.stage === 'reviewing_chapters') return this.runGenerateChapters(12);
+    if (this.stage === 'reviewing_chapters') return this.runGenerateChapters();
   }
 
   // ── 各阶段实现 ──
 
+  /** 解析并执行一句话简介 → 创建系列 → 生成世界观。 */
   private async handleLoglinePhase(text: string): Promise<void> {
-    // 解析一句话里的标题 / 简介（画风已统一由创建系列时的 DNA 预设锁定，不再从聊天中接受）
     const { title, logline } = parseLogline(text);
     if (!title || !logline) {
       this.messages.push(agentMsg(
@@ -401,52 +506,90 @@ export class AgentEngine {
 
   private async approveCharacters(): Promise<void> {
     this.stage = 'reviewing_chapters';
+    const plan = this.getEpisodePlan();
+    const prefix = plan.source === 'arcBlueprints' ? '季蓝图共规划' : '推荐';
     this.messages.push(agentMsg(
-      '角色已确认 ✅。请告诉我**总页数**（推荐 8-20 页），我会自动拆章节。\n' +
-      '或者直接回复「开始拆分」按默认 12 页处理。',
+      `角色已确认 ✅。接下来规划话目：${prefix} **${plan.totalEpisodes} 话**（每话一件完整的事，约 15 格）。\n` +
+      `直接回复「**开始拆分**」按规划处理，或说「**拆 8 话**」指定话数。`,
     ));
     this.emit();
   }
 
-  private async runGenerateChapters(target = 12): Promise<void> {
+  /**
+   * 规划话目大纲。与左侧工作台同构：
+   *   季蓝图就绪 → 物化季骨架 → 逐季生成话目；已有 arcs → 补齐空季；否则走旧版直接拆章。
+   * episodesHint：用户指定的话数（仅旧结构路径用于换算目标页数，每话 ≈ 2 页 ≈ 15 格）。
+   */
+  private async runGenerateChapters(episodesHint?: number): Promise<void> {
+    const s = this.getSeries();
+    if (!s) return;
     this.stage = 'reviewing_chapters';
-    this.messages.push(agentMsg(`正在按 **${target}** 页拆分章节…`, { pending: true }));
+    this.messages.push(agentMsg('正在规划话目大纲…', { pending: true }));
     this.emit();
     try {
-      const chs = await this.genChapters(target);
+      // 路由 1：蓝图就绪但还没季骨架 → 先物化季骨架（同左侧「生成季骨架」）
+      let arcs = s.arcs && s.arcs.length > 0 ? s.arcs : null;
+      const blueprints = s.worldview?.arcBlueprints ?? [];
+      if (!arcs && blueprints.length > 0) {
+        this.messages.push(agentMsg(`按蓝图物化 **${blueprints.length}** 个季骨架…`, { pending: true }));
+        this.emit();
+        const generated = await this.genArcs();
+        if (!generated || generated.length === 0) throw new Error('生成季骨架失败');
+        arcs = generated;
+      }
+
+      let all: Chapter[] = [];
+      // 路由 2：有 arcs → 逐季生成话目（同左侧「生成本章话目」）
+      if (arcs && arcs.length > 0) {
+        for (const arc of arcs) {
+          if (arc.chapters.length > 0) {
+            all.push(...arc.chapters);
+            continue;
+          }
+          // 每话 ≈ 2 页（15 格）；plannedChapterCount 缺省按 2 话
+          const target = Math.max(2, (arc.plannedChapterCount ?? 2) * 2);
+          const chs = await this.genArcChapters(arc.id, { targetPageCount: target });
+          if (chs && chs.length > 0) all.push(...chs);
+        }
+      } else {
+        // 路由 3：旧结构直接拆章
+        const target = episodesHint ? Math.max(2, episodesHint * 2) : 12;
+        const chs = await this.genChapters(target);
+        if (chs) all = chs;
+      }
+
       this.messages = this.messages.filter(m => !m.pending);
-      if (!chs || chs.length === 0) throw new Error('生成章节失败');
-      const totalPages = chs.reduce((sum, c) => sum + c.pages.length, 0);
+      if (all.length === 0) throw new Error('生成话目失败');
+      const totalPanels = all.reduce((sum, c) => sum + c.pages.reduce((n, p) => n + p.panels.length, 0), 0);
       this.messages.push(agentMsg(
-        `生成了 **${chs.length}** 个章节，共 **${totalPages}** 页。请审阅：`,
-        { card: { kind: 'chapters', chapters: chs } },
+        `话目大纲出来了：共 **${all.length}** 话 / 约 **${totalPanels}** 格。请审阅：`,
+        { card: { kind: 'chapters', chapters: all } },
       ));
       this.emit();
     } catch (e: any) {
       this.messages = this.messages.filter(m => !m.pending);
-      this.messages.push(agentMsg(`生成章节失败：${e.message || e}`, { error: e.message || String(e) }));
+      this.messages.push(agentMsg(`生成话目失败：${e.message || e}`, { error: e.message || String(e) }));
       this.emit();
     }
   }
 
   private async approveChapters(): Promise<void> {
     this.stage = 'producing_pages';
-    // 自动跳到第一页
-    const s = this.getSeries();
-    const firstPage = s?.chapters?.[0]?.pages?.[0];
-    if (firstPage) this.selectPage(firstPage.id);
+    const episodes = this.flattenEpisodes(this.getSeries());
+    const first = episodes[0];
+    if (first) this.selectEpisode(first.id);
     this.messages.push(agentMsg(
-      '章节大纲已确认 ✅。已经为你跳到 **第 1 章 第 1 页**。\n' +
+      (first ? `话目大纲已确认 ✅。已为你定位到 **第 1 话《${first.title}》**。\n` : '话目大纲已确认 ✅。\n') +
       '现在可以：\n' +
-      '• 说「**拆解分镜**」让我拆这页的分镜\n' +
-      '• 说「**整页出图**」直接出整页图\n' +
-      '• 说「**自动跑 N 页**」让我连出 N 页\n' +
-      '• 说「**跳到第 X 页**」切到指定页',
+      '• 说「**拆解分镜**」拆当前批的分镜\n' +
+      '• 说「**出图第 1 话**」整话补图（已有图不重画）\n' +
+      '• 说「**自动跑**」从第 1 话开始连跑\n' +
+      '• 说「**跳到第 X 话**」切换话卡片',
     ));
     this.emit();
   }
 
-  // ── 逐页生成阶段：自然语言指令 ──
+  // ── 逐话生成阶段：自然语言指令 ──
 
   private async handleProducingPhase(text: string): Promise<void> {
     const s = this.getSeries();
@@ -456,80 +599,154 @@ export class AgentEngine {
       this.greet();
       return;
     }
-    const pageId = this.getSelectedPageId();
+    const { episodes, totalPanels, donePanels } = this.getEpisodeProgress();
     const t = text.trim();
 
-    // 跳页
-    const jump = t.match(/^(?:跳到|打开|切到|去|go to)?\s*第?\s*(\d+)\s*页$/);
+    // 跳到第 X 话
+    const jump = t.match(/^(?:跳到|打开|切到|去|go to)?\s*第?\s*(\d+)\s*话$/);
     if (jump) {
       const idx = parseInt(jump[1], 10) - 1;
-      const allPages = s.chapters.flatMap(c => c.pages);
-      if (allPages[idx]) {
-        this.selectPage(allPages[idx].id);
-        this.messages.push(agentMsg(`已跳到第 ${idx + 1} 页。`));
+      const ch = episodes[idx];
+      if (ch) {
+        this.selectEpisode(ch.id);
+        const epPanels = ch.pages.reduce((n, p) => n + p.panels.length, 0);
+        const epDone = ch.pages.reduce((n, p) => n + p.panels.filter(pn => pn.imageUrl).length, 0);
+        this.messages.push(agentMsg(`已切到 **第 ${idx + 1} 话《${ch.title}》**（已生成 ${epDone}/${epPanels} 格），左侧卡片已同步。`));
         this.emit();
       } else {
-        this.messages.push(agentMsg(`只有 ${allPages.length} 页，没有第 ${idx + 1} 页。`));
+        this.messages.push(agentMsg(`目前共 ${episodes.length} 话，没有第 ${idx + 1} 话。`));
         this.emit();
       }
       return;
     }
 
-    // 自动跑 N 页
-    const auto = t.match(/^(?:自动跑|连续跑|跑完|一直跑)\s*(\d+)?\s*页?$/);
-    if (auto) {
-      const n = auto[1] ? parseInt(auto[1], 10) : 999;
-      this.messages.push(agentMsg(`好的，我会从当前页起跑 **最多 ${n}** 页。出图可能较慢（每页 2-6 分钟），你可以挂着去做别的事，我会汇报每页的进度。`));
-      this.emit();
-      await this.autoRunPages(n);
+    // 出图/生成 第 X 话（整话增量补图）
+    const genEp = t.match(/^(?:出图|生成|画|跑完?)\s*第?\s*(\d+)\s*话$/);
+    if (genEp) {
+      const idx = parseInt(genEp[1], 10) - 1;
+      const ch = episodes[idx];
+      if (!ch) {
+        this.messages.push(agentMsg(`目前共 ${episodes.length} 话，没有第 ${idx + 1} 话。`));
+        this.emit();
+        return;
+      }
+      this.selectEpisode(ch.id);
+      await this.runGenerateEpisode(idx, ch);
       return;
     }
+
+    // 自动跑 [N 话]
+    const auto = t.match(/^(?:自动跑|连续跑|跑完|一直跑)\s*(\d+)?\s*话?$/);
+    if (auto) {
+      const n = auto[1] ? parseInt(auto[1], 10) : episodes.length;
+      if (totalPanels === 0) {
+        this.messages.push(agentMsg('还没有话目分镜。先说「开始拆分」规划话目。'));
+        this.emit();
+        return;
+      }
+      const missing = totalPanels - donePanels;
+      this.messages.push(agentMsg(
+        missing > 0
+          ? `好的，从当前话起跑 **最多 ${n}** 话，共缺 **${missing}** 格。出图较慢（每格 ~40s），你可以挂着去做别的事，我会按话汇报进度。`
+          : '目前全部格都已完成，没有需要跑的。可以说「续写本话」追加剧情。',
+      ));
+      this.emit();
+      await this.autoRunEpisodes(n);
+      return;
+    }
+
+    // 生成/重出 第 N 格（相对当前话的整话连续格号）
+    const panelGen = t.match(/^(?:生成|重出|重画|画)\s*第?\s*(\d+)\s*格$/);
+    if (panelGen) {
+      const n = parseInt(panelGen[1], 10);
+      const curEp = episodes.find(c => c.id === this.getSelectedEpisodeId())
+        ?? episodes.find(c => c.pages.some(p => p.id === this.getSelectedPageId()));
+      if (!curEp) {
+        this.messages.push(agentMsg('先在左侧选一话（或说「跳到第 X 话」）再操作单格。'));
+        this.emit();
+        return;
+      }
+      const pages = [...curEp.pages].sort((a, b) => a.pageNumber - b.pageNumber);
+      let acc = 0;
+      let target: { pageId: string; panelIndex: number } | null = null;
+      for (const pg of pages) {
+        if (n > acc && n <= acc + pg.panels.length) {
+          target = { pageId: pg.id, panelIndex: pg.panels.map(pn => pn.index).sort((a, b) => a - b)[n - acc - 1] };
+          break;
+        }
+        acc += pg.panels.length;
+      }
+      if (!target) {
+        this.messages.push(agentMsg(`《${curEp.title}》共 ${acc} 格，没有第 ${n} 格。`));
+        this.emit();
+        return;
+      }
+      this.messages.push(agentMsg(`正在重出《${curEp.title}》第 ${n} 格（只动这一格，约 40s）…`, { pending: true }));
+      this.emit();
+      try {
+        await this.generatePanel(target.pageId, target.panelIndex);
+        this.messages = this.messages.filter(m => !m.pending);
+        this.messages.push(agentMsg(`✅ 第 ${n} 格已重出。不满意可以再来一次，或说「改这一格：xxx」换内容。`));
+        this.emit();
+      } catch (e: any) {
+        this.messages = this.messages.filter(m => !m.pending);
+        this.messages.push(agentMsg(`单格生成失败：${e.message || e}`, { error: e.message || String(e) }));
+        this.emit();
+      }
+      return;
+    }
+
+    // —— 当前批（page）操作：沿用左侧选中状态 ——
+    const pageId = this.getSelectedPageId();
 
     // 拆解分镜
     if (/^(拆解分镜|拆分分镜|拆镜|breakdown)$/i.test(t)) {
       if (!pageId) {
-        this.messages.push(agentMsg('先选一页再拆解。'));
+        this.messages.push(agentMsg('先在左侧选一话再拆解。'));
         this.emit();
         return;
       }
       await this.runBreakdownPage(pageId);
       return;
     }
-    // 整页出图
-    if (/^(整页出图|出图|生成页面|画这页|generate page)$/i.test(t)) {
+    // 出图当前批（增量）
+    if (/^(整页出图|出图|出图此批|生成此批|画这批|generate page)$/i.test(t)) {
       if (!pageId) {
-        this.messages.push(agentMsg('先选一页。'));
+        this.messages.push(agentMsg('先在左侧选一话。'));
         this.emit();
         return;
       }
-      await this.runGeneratePage(pageId);
+      await this.runGenerateBatch(pageId);
       return;
     }
-    // 重生
-    if (/^(重新生成|重画|regen|再来)$/i.test(t)) {
+    // 重画当前批
+    if (/^(重新生成|重画|重画此批|regen|再来)$/i.test(t)) {
       if (!pageId) {
-        this.messages.push(agentMsg('先选一页。'));
+        this.messages.push(agentMsg('先在左侧选一话。'));
         this.emit();
         return;
       }
       await this.runRegeneratePage(pageId);
       return;
     }
-    // 续写下一页
-    if (/^(续写下一页|下一|next|continue)$/i.test(t)) {
-      if (!pageId) {
-        this.messages.push(agentMsg('先选一页。'));
+    // 续写本话
+    if (/^(续写下一页|续写本话|续写|下一|next|continue)$/i.test(t)) {
+      const curEp = episodes.find(c => c.id === this.getSelectedEpisodeId())
+        ?? episodes.find(c => c.pages.some(p => p.id === pageId));
+      const lastPage = curEp ? [...curEp.pages].sort((a, b) => a.pageNumber - b.pageNumber).slice(-1)[0] : null;
+      if (!lastPage) {
+        this.messages.push(agentMsg('先在左侧选一话再续写。'));
         this.emit();
         return;
       }
-      await this.runContinueNextPage(pageId);
+      await this.runContinueNextPage(lastPage.id);
       return;
     }
-    // 用一句话改这一页
-    const rewriteMatch = t.match(/^(?:改写|修改|改这页|rewrite)[:：\s]+(.+)$/);
+    // 用一句话改当前批
+    const rewriteMatch = t.match(/^(?:改写|修改|改这批|改这一批|rewrite)[:：\s]+(.+)$/);
     if (rewriteMatch) {
       if (!pageId) {
-        this.messages.push(agentMsg('先选一页再改。'));
+        this.messages.push(agentMsg('先在左侧选一话再改。'));
         this.emit();
         return;
       }
@@ -537,15 +754,74 @@ export class AgentEngine {
       return;
     }
 
-    // 没匹配到具体指令 → 当作通用对话（让模型用文字回答）
-    // 这里直接走"通用对话"通道：把问题送进文字生成模型，回复一段自然语言
+    // 没匹配到具体指令 → 当作通用对话（带系列上下文）
     await this.askFreeformQuestion(t);
   }
 
-  private parsePageCount(text: string): number | null {
-    const m = text.match(/(\d+)\s*页/);
-    if (m) return Math.max(4, Math.min(60, parseInt(m[1], 10)));
+  /** 解析"拆 N 话"的话数。 */
+  private parseEpisodeCount(text: string): number | null {
+    const m = text.match(/(\d+)\s*话/);
+    if (m) return Math.max(1, Math.min(30, parseInt(m[1], 10)));
     return null;
+  }
+
+  /** 整话增量出图：缺格补齐、已有图不动。返回是否跑完（false = 中途失败）。 */
+  private async runGenerateEpisode(epIdx: number, ch: Chapter): Promise<boolean> {
+    this.selectEpisode(ch.id); // 左侧话卡片跟随
+    const epPanels = ch.pages.reduce((n, p) => n + p.panels.length, 0);
+    this.messages.push(agentMsg(`▶ 开始出图 **第 ${epIdx + 1} 话《${ch.title}》**（${epPanels} 格，每格 ~40s）…`, { pending: true }));
+    this.emit();
+    try {
+      const pages = [...ch.pages].sort((a, b) => a.pageNumber - b.pageNumber);
+      for (const pg of pages) {
+        if (pg.panels.length === 0) {
+          await this.breakdownPage(pg.id);
+        }
+        const fresh = this.flattenEpisodes(this.getSeries())
+          .find(c => c.id === ch.id)?.pages.find(p => p.id === pg.id);
+        if (fresh && fresh.panels.length > 0 && fresh.panels.every(pn => pn.imageUrl)) continue;
+        const r = await this.generatePage(pg.id);
+        if (!r) throw new Error('生成中断');
+      }
+      this.messages = this.messages.filter(m => !m.pending);
+      const done = this.flattenEpisodes(this.getSeries())
+        .find(c => c.id === ch.id)?.pages.reduce((n, p) => n + p.panels.filter(pn => pn.imageUrl).length, 0) ?? 0;
+      this.messages.push(agentMsg(
+        `✅ 第 ${epIdx + 1} 话《${ch.title}》出图完成（${done} 格）。可以说「**公众号预览**」去审阅，或「**重出第 N 格**」微调单格。`,
+      ));
+      this.emit();
+      return true;
+    } catch (e: any) {
+      this.messages = this.messages.filter(m => !m.pending);
+      const done = this.flattenEpisodes(this.getSeries())
+        .find(c => c.id === ch.id)?.pages.reduce((n, p) => n + p.panels.filter(pn => pn.imageUrl).length, 0) ?? 0;
+      this.messages.push(agentMsg(
+        `第 ${epIdx + 1} 话出图中断（${e.message || e}）。已完成 ${done} 格，修好后说「**出图第 ${epIdx + 1} 话**」继续 —— 已有图不会重画。`,
+        { error: e.message || String(e) },
+      ));
+      this.emit();
+      return false;
+    }
+  }
+
+  /** 自动跑：从当前话起逐话补齐缺图。 */
+  private async autoRunEpisodes(n: number): Promise<void> {
+    const { episodes } = this.getEpisodeProgress();
+    if (episodes.length === 0) return;
+    let startIdx = episodes.findIndex(c => c.id === this.getSelectedEpisodeId());
+    if (startIdx < 0) startIdx = 0;
+    let processed = 0;
+    for (let i = startIdx; i < episodes.length && processed < n; i++, processed++) {
+      const ok = await this.runGenerateEpisode(i, episodes[i]);
+      if (!ok) {
+        this.messages.push(agentMsg('已停下。修一下再继续？'));
+        this.emit();
+        return;
+      }
+    }
+    const { totalPanels, donePanels } = this.getEpisodeProgress();
+    this.messages.push(agentMsg(`🎉 跑完了 ${processed} 话。目前总进度 ${donePanels}/${totalPanels} 格。`));
+    this.emit();
   }
 
   private async runBreakdownPage(pageId: string): Promise<void> {
@@ -555,7 +831,7 @@ export class AgentEngine {
       const page = await this.breakdownPage(pageId);
       this.messages = this.messages.filter(m => !m.pending);
       if (!page) throw new Error('拆解失败');
-      const ch = this.getSeries()?.chapters.find(c => c.pages.some(p => p.id === pageId));
+      const ch = this.flattenEpisodes(this.getSeries()).find(c => c.pages.some(p => p.id === pageId));
       this.messages.push(agentMsg(
         `已拆出 **${page.panels.length}** 个分镜。请审阅：`,
         { card: { kind: 'page_preview', chapterTitle: ch?.title || '', page } },
@@ -568,19 +844,19 @@ export class AgentEngine {
     }
   }
 
-  private async runGeneratePage(pageId: string): Promise<void> {
-    this.messages.push(agentMsg('正在生成整页图片（分镜逐格出图，可能需要几分钟）…', { pending: true }));
+  private async runGenerateBatch(pageId: string): Promise<void> {
+    this.messages.push(agentMsg('正在出图当前批（增量：缺哪格补哪格，已有图不重画）…', { pending: true }));
     this.emit();
     try {
       const page = await this.generatePage(pageId);
       this.messages = this.messages.filter(m => !m.pending);
       if (!page) throw new Error('生成失败');
-      // P2-14：页级 generatedImage 已废弃，改判「每格都有图」
-      const allDone = page.panels.length > 0 && page.panels.every(p => !!p.imageUrl);
+      const done = page.panels.filter(p => !!p.imageUrl).length;
+      const allDone = page.panels.length > 0 && done === page.panels.length;
       this.messages.push(agentMsg(
         allDone
-          ? `✅ 第 ${page.pageNumber} 页生成完成（${page.panels.length} 格）。还想调吗？可以说「**改这一页：xxx**」。`
-          : `第 ${page.pageNumber} 页状态：${page.status}${page.errorMessage ? ` — ${page.errorMessage}` : ''}`,
+          ? `✅ 本批 ${page.panels.length} 格全部生成完成。还想调吗？可以说「**改写：xxx**」换内容，或「**重出第 N 格**」重画单格。`
+          : `本批状态：${page.status}${page.errorMessage ? ` — ${page.errorMessage}` : ''}（已完成 ${done}/${page.panels.length} 格）`,
       ));
       this.emit();
     } catch (e: any) {
@@ -591,28 +867,27 @@ export class AgentEngine {
   }
 
   private async runRegeneratePage(pageId: string): Promise<void> {
-    this.messages.push(agentMsg('正在重新生成…', { pending: true }));
+    this.messages.push(agentMsg('正在重画当前批（整批全部重画）…', { pending: true }));
     this.emit();
     try {
       await this.regeneratePage(pageId);
       this.messages = this.messages.filter(m => !m.pending);
-      this.messages.push(agentMsg('已重新生成。'));
+      this.messages.push(agentMsg('已重画完成。'));
       this.emit();
     } catch (e: any) {
       this.messages = this.messages.filter(m => !m.pending);
-      this.messages.push(agentMsg(`重新生成失败：${e.message || e}`, { error: e.message || String(e) }));
+      this.messages.push(agentMsg(`重画失败：${e.message || e}`, { error: e.message || String(e) }));
       this.emit();
     }
   }
 
   private async runRewritePage(pageId: string, instruction: string): Promise<void> {
-    this.messages.push(agentMsg(`好的，我会按「${instruction}」改这一页。`, { pending: true }));
+    this.messages.push(agentMsg(`好的，我会按「${instruction}」改这一批（内容+图都会更新）。`, { pending: true }));
     this.emit();
     try {
-      const page = await this.rewritePage(pageId, instruction);
+      await this.rewritePage(pageId, instruction);
       this.messages = this.messages.filter(m => !m.pending);
-      if (!page) throw new Error('改写失败');
-      this.messages.push(agentMsg(`✅ 第 ${page.pageNumber} 页已按你的要求重写并出图。`));
+      this.messages.push(agentMsg('✅ 已按你的要求重写并出图。'));
       this.emit();
     } catch (e: any) {
       this.messages = this.messages.filter(m => !m.pending);
@@ -622,13 +897,13 @@ export class AgentEngine {
   }
 
   private async runContinueNextPage(pageId: string): Promise<void> {
-    this.messages.push(agentMsg('正在续写下一页（剧情 + 分镜 + 图片）…', { pending: true }));
+    this.messages.push(agentMsg('正在续写本话（基于已生成格 + 前文剧情，追加约 6 格）…', { pending: true }));
     this.emit();
     try {
       const page = await this.continueNextPage(pageId);
       this.messages = this.messages.filter(m => !m.pending);
       if (!page) throw new Error('续写失败');
-      this.messages.push(agentMsg(`✅ 第 ${page.pageNumber} 页已生成（自动跳过去）。`));
+      this.messages.push(agentMsg(`✅ 已为本话追加一批（${page.panels.length} 格），左侧已同步。可以继续「出图此批」补图。`));
       this.emit();
     } catch (e: any) {
       this.messages = this.messages.filter(m => !m.pending);
@@ -637,55 +912,20 @@ export class AgentEngine {
     }
   }
 
-  private async autoRunPages(n: number): Promise<void> {
-    const s0 = this.getSeries();
-    if (!s0) return;
-    const allPages = s0.chapters.flatMap(c => c.pages);
-    const startIdx = allPages.findIndex(p => p.id === this.getSelectedPageId());
-    if (startIdx < 0) {
-      this.messages.push(agentMsg('请先选一页再开始自动跑。'));
-      this.emit();
-      return;
-    }
-    let processed = 0;
-    for (let i = startIdx; i < allPages.length && processed < n; i++, processed++) {
-      const p = allPages[i];
-      this.selectPage(p.id);
-      this.messages.push(agentMsg(`▶ 正在处理第 ${p.pageNumber} 页…`, { pending: true }));
-      this.emit();
-      try {
-        let cur = this.getSeries()?.chapters.flatMap(c => c.pages).find(x => x.id === p.id);
-        // 若没拆过分镜，先拆
-        if (!cur || cur.panels.length === 0) {
-          cur = await this.breakdownPage(p.id) || cur || null;
-        }
-        // 出图
-        if (cur) {
-          await this.generatePage(p.id);
-        }
-      } catch (e: any) {
-        this.messages = this.messages.filter(m => !m.pending);
-        this.messages.push(agentMsg(`第 ${p.pageNumber} 页失败：${e.message || e}`, { error: e.message || String(e) }));
-        this.emit();
-        // 失败则停下让用户决定
-        this.messages.push(agentMsg('已停下。修一下再继续？'));
-        this.emit();
-        return;
-      }
-    }
-    this.messages = this.messages.filter(m => !m.pending);
-    this.messages.push(agentMsg(`🎉 跑完了 ${processed} 页。`));
-    this.emit();
-  }
-
   private async askFreeformQuestion(text: string): Promise<void> {
-    // 走文字生成接口，做"普通对话"。由前端调用 modelClient。
+    // 走文字生成接口，做"普通对话"。由前端调用 modelClient。带上系列实际进度，回答才不悬空。
     this.messages.push(agentMsg('正在思考…', { pending: true }));
     this.emit();
     try {
       const { generateText } = await import('./modelClient');
+      const s = this.getSeries();
+      const { episodes, totalPanels, donePanels } = this.getEpisodeProgress();
+      const curIdx = episodes.findIndex(c => c.id === this.getSelectedEpisodeId());
+      const ctxLine = s
+        ? `当前系列「${s.title}」：世界观${s.worldview ? '已生成' : '未生成'}、角色 ${s.characters.length} 位、话目 ${episodes.length} 话、分镜已完成 ${donePanels}/${totalPanels} 格${curIdx >= 0 ? `、左侧正看着第 ${curIdx + 1} 话《${episodes[curIdx].title}》` : ''}。创作单位是「话」（每话一件完整的事，约 15 格），内部不分页。`
+        : '尚未创建系列。';
       const r = await generateText({
-        prompt: `你是一个漫画创作助手。用户问：${text}\n\n用简短中文回答（不超过 80 字）。`,
+        prompt: `你是一个漫画创作助手。${ctxLine}\n用户说：${text}\n\n用简短中文回答（不超过 120 字）。不要编造不存在的进度或功能；如果用户想要的操作你有对应指令（如「出图第 X 话」「重出第 N 格」「续写本话」），提示他说这句指令。`,
       }, 30000);
       this.messages = this.messages.filter(m => !m.pending);
       this.messages.push(agentMsg(r.text));

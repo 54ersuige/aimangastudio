@@ -11,6 +11,8 @@ import type { ImageRequest, TextRequest } from './utils.js';
 import { sendError, logGeneration } from './utils.js';
 import { withDnaImagePrompt, withDnaTextPrompt, resolveDnaKey } from './dna-inject.js';
 import { listDna, DNA_KEYS } from './dna/registry.js';
+import { readRecentAudits, computeDriftScore, computeDimensionAverages } from './audit/panel-audit.js';
+import { getLegacyCharacters } from './series-store.js';
 
 const router = Router();
 
@@ -20,6 +22,8 @@ function getTextProvider(config: ModelConfig['text']) {
       return gemini;
     case 'deepseek':
       return deepseek;
+    case 'minimax':
+      return minimax;
     case 'agnes':
       return agnes;
     case 'openai-compatible':
@@ -53,6 +57,8 @@ router.get('/config', (_req, res) => {
   res.json({
     text: { ...config.text, apiKey: maskKey(config.text.apiKey) },
     image: { ...config.image, apiKey: maskKey(config.image.apiKey) },
+    // 2026-09-03：视觉模型独立配置带回前端（同样掩码 apiKey）。
+    vision: { ...config.vision, apiKey: maskKey(config.vision.apiKey) },
     dnaKey: config.dnaKey,
   });
 });
@@ -73,7 +79,7 @@ function maskKey(key?: string): string | undefined {
 
 const UpdateConfigSchema = z.object({
   text: z.object({
-    provider: z.enum(['gemini', 'deepseek', 'agnes', 'openai-compatible']),
+    provider: z.enum(['gemini', 'deepseek', 'minimax', 'agnes', 'openai-compatible']),
     model: z.string(),
     apiKey: z.string().optional(),
     baseUrl: z.string().optional(),
@@ -82,6 +88,17 @@ const UpdateConfigSchema = z.object({
   }).optional(),
   image: z.object({
     provider: z.enum(['gemini', 'step', 'minimax', 'agnes', 'openai-compatible']),
+    model: z.string(),
+    apiKey: z.string().optional(),
+    baseUrl: z.string().optional(),
+    timeout: z.number().int().min(1000),
+    extraParams: z.record(z.any()),
+  }).optional(),
+  // 2026-09-03：视觉模型独立 schema，与 text/image 同形。
+  // enabled 字段：false 时 limb-guard 直接跳过，不会因 key 缺失报 500。
+  vision: z.object({
+    enabled: z.boolean().optional(),
+    provider: z.enum(['gemini', 'minimax', 'agnes', 'deepseek', 'openai-compatible']),
     model: z.string(),
     apiKey: z.string().optional(),
     baseUrl: z.string().optional(),
@@ -109,15 +126,36 @@ router.post('/config', (req, res) => {
   const next: ModelConfig = {
     text: { ...current.text, ...(parsed.data.text || {}) },
     image: { ...current.image, ...(parsed.data.image || {}) },
+    // 2026-09-03：vision 字段同样合并。enabled 一并吃过来（默认 false → 用户改了 model 没开 enabled 仍走跳过）。
+    vision: { ...current.vision, ...(parsed.data.vision || {}) },
     dnaKey: nextDnaKey,
   };
 
-  // When the frontend sends a masked key, preserve the original unless it changed.
-  if (parsed.data.text?.apiKey?.includes('***')) {
-    next.text.apiKey = current.text.apiKey;
+  // 前端 /config 返回的是掩码 key（maskKey，如 `sk-Ab..cD`）。
+  // 若前台把掩码 key 原样传回（未修改），需保留服务端已存的真实 key；
+  // 仅当用户填入了新的完整 key（与掩码不相等）时才覆盖。
+  const maskMatch = (candidate?: string, masked?: string) => Boolean(candidate && masked && candidate === masked);
+  if (parsed.data.text?.apiKey) {
+    if (!maskMatch(parsed.data.text.apiKey, maskKey(current.text.apiKey))) {
+      next.text.apiKey = parsed.data.text.apiKey;
+    } else {
+      next.text.apiKey = current.text.apiKey;
+    }
   }
-  if (parsed.data.image?.apiKey?.includes('***')) {
-    next.image.apiKey = current.image.apiKey;
+  if (parsed.data.image?.apiKey) {
+    if (!maskMatch(parsed.data.image.apiKey, maskKey(current.image.apiKey))) {
+      next.image.apiKey = parsed.data.image.apiKey;
+    } else {
+      next.image.apiKey = current.image.apiKey;
+    }
+  }
+  // 2026-09-03：vision.apiKey 同样处理掩码回写。
+  if (parsed.data.vision?.apiKey) {
+    if (!maskMatch(parsed.data.vision.apiKey, maskKey(current.vision.apiKey))) {
+      next.vision.apiKey = parsed.data.vision.apiKey;
+    } else {
+      next.vision.apiKey = current.vision.apiKey;
+    }
   }
 
   saveConfig(next);
@@ -196,6 +234,50 @@ router.post('/image', async (req, res) => {
     console.error('Image generation failed:', e);
     sendError(res, 502, e.message || 'Image generation failed');
   }
+});
+
+// ========== 2026-09-07 反馈层 P4：审计 API（供 UI 审计 Tab + 红条用）==========
+
+/**
+ * GET /api/audit/recent?limit=100
+ * 返回最近的 panel 出图审计记录（按 ts 倒序）。
+ * UI 的"审计 Tab"直接读这个。
+ */
+router.get('/audit/recent', (req, res) => {
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
+  const records = readRecentAudits(limit);
+  res.json({ records, count: records.length });
+});
+
+/**
+ * GET /api/audit/drift-score?seriesId=xxx
+ * 返回指定 series 的连载质量分（0-100）。无 review 数据时返回 null。
+ */
+router.get('/audit/drift-score', (req, res) => {
+  const seriesId = String(req.query.seriesId || '');
+  if (!seriesId) return sendError(res, 400, 'seriesId is required');
+  const score = computeDriftScore(seriesId);
+  res.json({ seriesId, score });
+});
+
+/**
+ * GET /api/audit/dimensions?seriesId=xxx
+ * 返回 8 维评审各自的平均分（0-10，1 位小数）。无数据时各维为 null。
+ */
+router.get('/audit/dimensions', (req, res) => {
+  const seriesId = String(req.query.seriesId || '');
+  if (!seriesId) return sendError(res, 400, 'seriesId is required');
+  const averages = computeDimensionAverages(seriesId);
+  res.json({ seriesId, dimensions: averages });
+});
+
+/**
+ * GET /api/audit/legacy-list
+ * 返回所有 legacy 角色（缺必填字段），UI 顶部红条用。
+ */
+router.get('/audit/legacy-list', (_req, res) => {
+  const list = getLegacyCharacters();
+  res.json({ list, count: list.length });
 });
 
 export default router;

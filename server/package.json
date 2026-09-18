@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch index.ts",
     "start": "tsx index.ts",
-    "build": "tsc"
+    "build": "tsc -p tsconfig.build.json && node scripts/postbuild.mjs"
   },
   "dependencies": {
     "@google/genai": "^1.16.0",

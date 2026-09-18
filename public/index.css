@@ -35,6 +35,18 @@ body {
   background: var(--paper);
 }
 
+/* —— 印刷纸张颗粒（极淡，multiply 只压亮部，不影响可读性） —— */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='160' height='160' filter='url(%23n)' opacity='0.045'/></svg>");
+  background-size: 160px 160px;
+}
+
 /* —— 全局排版 —— */
 
 .tnum {
@@ -245,7 +257,10 @@ body {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  transition: transform .35s ease;
 }
+.panel-thumb:hover { border-color: var(--ink-3); }
+.panel-thumb:hover img { transform: scale(1.03); }
 
 /* —— Toast 容器 —— */
 .toast-stack {
@@ -295,6 +310,8 @@ body {
   padding: 1.75rem 2rem;
   max-width: 28rem;
   width: calc(100% - 2rem);
+  /* 纸张悬浮在版面上方的物理深度 */
+  box-shadow: 0 24px 64px rgba(26, 26, 26, 0.22);
 }
 @keyframes veil-in {
   from { background: rgba(26,26,26,0); }
@@ -329,4 +346,260 @@ textarea:focus-visible,
 [role="button"]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* —— 编辑部签名：报头下的 Oxford 双线（粗线由元素自带 border 提供） —— */
+.app-shell [data-topbar]::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -5px;
+  border-bottom: 1px solid var(--rule);
+  pointer-events: none;
+}
+
+/* —— 动效可关闭：尊重系统「减少动态效果」设置 —— */
+@media (prefers-reduced-motion: reduce) {
+  .fade-in,
+  .toast,
+  .modal-veil { animation: none; }
+  .card,
+  .btn,
+  .panel-thumb img,
+  .progress-meter__fill,
+  .wechat-preview__frame { transition: none; }
+}
+
+/* ============================================================
+ * 响应式断点（先做响应式：移动优先，断点向下兼容桌面）
+ * ============================================================ */
+
+/* 默认（手机 / 窄屏）布局：顶栏纵向堆叠、隐藏编辑铭牌 */
+@media (max-width: 640px) {
+  .app-shell { min-width: 0; }
+  .headline { font-size: 1.05rem; }
+  .progress-meter { font-size: 0.6875rem; }
+  .modal-card { padding: 1.25rem !important; }
+  .btn { padding: 0.5rem 0.875rem; font-size: 0.8125rem; }
+
+  /* 顶栏：保留品牌和当前项目，把次要操作交给换行区域 */
+  .app-shell [data-topbar] {
+    padding-left: 0.75rem !important;
+    padding-right: 0.75rem !important;
+  }
+  .app-shell [data-topbar] > div:first-child {
+    grid-template-columns: minmax(0, 1fr) auto !important;
+    gap: 0.5rem !important;
+  }
+  .app-shell [data-topbar] > div:first-child > div:nth-child(2) { display: none; }
+  .app-shell [data-topbar] > div:first-child > div:last-child > button {
+    max-width: 10.5rem;
+    overflow: hidden;
+  }
+  .app-shell [data-topbar] > div:last-of-type {
+    gap: 0.35rem;
+  }
+  .app-shell [data-topbar] > div:last-of-type > div:first-child { display: none; }
+  .app-shell [data-topbar] [data-topbar-project-menu] {
+    left: 0.75rem !important;
+    right: 0.75rem !important;
+    min-width: 0 !important;
+  }
+
+  /* 侧栏在窄屏改为固定抽屉，避免挤占主工作台 */
+  .app-shell [data-chat-panel] {
+    position: fixed !important;
+    inset: 0 0 0 auto !important;
+    z-index: 55 !important;
+    width: min(92vw, 380px) !important;
+    max-width: 100% !important;
+    box-shadow: -12px 0 30px rgba(0, 0, 0, 0.18);
+  }
+  .app-shell [data-workbench] { min-width: 0; padding: 1.5rem 1rem 3rem; }
+  .app-shell [data-workbench] header { margin-bottom: 1.5rem; }
+  .app-shell [data-workbench] header h1 { font-size: 2rem; }
+  .app-shell [data-worldview-stats],
+  .app-shell [data-worldview-stats] > div { grid-template-columns: 1fr !important; }
+  .app-shell [data-panels-grid] { grid-template-columns: 1fr !important; }
+  .app-shell [data-editor-grid] { grid-template-columns: 1fr !important; }
+
+  .publisher-modal { max-height: 96vh !important; }
+  .publisher-modal > div:first-child { padding: 0.75rem !important; }
+  .publisher-modal > div:first-child > div:first-child { min-width: 0; }
+  .publisher-modal > div:first-child > div:first-child > span:last-child {
+    display: block;
+    max-width: 10rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .publisher-modal > div:first-child > div:last-child > button:nth-child(-n+2) {
+    padding: 0.35rem 0.5rem !important;
+    font-size: 0.6875rem !important;
+  }
+  .publisher-modal__panel,
+  .publisher-modal__preview { padding: 0.875rem 1rem; }
+  .publisher-modal__panel:nth-of-type(2) { max-height: none; }
+  .publisher-modal__preview { min-height: 28rem; }
+  .publisher-modal .publisher-modal__body { overflow-y: auto; }
+}
+
+/* 平板（>= 768px）：顶栏可改两行紧凑 */
+@media (min-width: 768px) {
+  .progress-meter__bar { width: 96px; }
+}
+
+/* 桌面（>= 1024px）：放宽间距、面板三栏 */
+@media (min-width: 1024px) {
+  .headline { font-size: 1.25rem; }
+  .modal-card { max-width: 56rem; }
+}
+
+/* 超宽屏（>= 1440px）：进一步放大 */
+@media (min-width: 1440px) {
+  .modal-card { max-width: 72rem; }
+  .progress-meter__bar { width: 128px; }
+}
+
+/* ============================================================
+ * Publisher Modal —— 三栏布局（配置 / 预览 / 导入清单）
+ * ============================================================ */
+
+.publisher-modal {
+  display: flex;
+  flex-direction: column;
+  max-height: 90vh;
+}
+
+.publisher-modal__body {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.publisher-modal__panel {
+  padding: 1rem 1.25rem;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--rule-soft);
+  background: var(--bg-card);
+}
+
+.publisher-modal__preview {
+  padding: 1rem 1.25rem;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+  border-bottom: 1px solid var(--rule-soft);
+}
+
+/* 平板：预览与配置双栏，导入清单在底部 */
+@media (min-width: 768px) {
+  .publisher-modal__body {
+    grid-template-columns: 18rem 1fr;
+    grid-template-rows: 1fr auto;
+  }
+  .publisher-modal__panel:nth-of-type(1) {
+    grid-row: 1 / span 2;
+    border-right: 1px solid var(--rule-soft);
+    border-bottom: none;
+  }
+  .publisher-modal__preview {
+    grid-row: 1;
+    grid-column: 2;
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  .publisher-modal__panel:nth-of-type(2) {
+    grid-row: 2;
+    grid-column: 2;
+    max-height: 18rem;
+  }
+}
+
+/* 桌面：三栏 */
+@media (min-width: 1280px) {
+  .publisher-modal__body {
+    grid-template-columns: 18rem 1fr 20rem;
+    grid-template-rows: 1fr;
+  }
+  .publisher-modal__panel:nth-of-type(1) {
+    grid-row: 1;
+    grid-column: 1;
+    border-right: 1px solid var(--rule-soft);
+    border-bottom: none;
+  }
+  .publisher-modal__preview {
+    grid-row: 1;
+    grid-column: 2;
+    border-right: 1px solid var(--rule-soft);
+    border-bottom: none;
+  }
+  .publisher-modal__panel:nth-of-type(2) {
+    grid-row: 1;
+    grid-column: 3;
+    max-height: none;
+    border-bottom: none;
+  }
+}
+
+/* ============================================================
+ * WeChat Preview —— 手机 / 桌面两种宽度
+ * ============================================================ */
+
+.wechat-preview {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow: auto;
+  background: var(--bg-paper-2);
+  padding: 1rem;
+}
+
+.wechat-preview__frame {
+  background: var(--paper);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.08);
+  width: 100%;
+  max-width: 100%;
+  transition: max-width 0.25s ease;
+}
+
+.wechat-preview__body {
+  padding: 1.25rem 1rem 2rem;
+}
+
+.wechat-preview__body img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* 手机预览：375px 宽（iPhone SE 起点） */
+.wechat-preview--mobile .wechat-preview__frame {
+  max-width: 380px;
+}
+
+.wechat-preview--mobile .wechat-preview__body {
+  padding: 1rem 0.875rem 1.5rem;
+  font-size: 15px;
+}
+
+/* 桌面预览：680px 宽，公众号正文区 */
+.wechat-preview--desktop .wechat-preview__frame {
+  max-width: 680px;
+}
+
+.wechat-preview--desktop .wechat-preview__body {
+  padding: 2rem 2.5rem 3rem;
+  font-size: 16px;
+}
+
+/* 超窄屏（< 380px）：把预览框再压缩 */
+@media (max-width: 380px) {
+  .wechat-preview { padding: 0.5rem; }
+  .wechat-preview--mobile .wechat-preview__frame { max-width: 100%; }
 }
