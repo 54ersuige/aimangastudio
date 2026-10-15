@@ -98,26 +98,31 @@ export class AgentEngine {
   private listeners: Array<() => void> = [];
 
   // 引擎所需的 SeriesContext 子集（由 React 层注入，全部为 getter 形式以避免闭包陷阱）。
-  private getSeries: () => Series | null;
-  private ensureSeries: (input: { title: string; logline: string }) => Promise<Series>;
-  private patchSeries: (patch: Partial<Pick<Series, 'title' | 'logline'>>) => Promise<Series | null>;
-  private genWorldview: (hint?: string) => Promise<Worldview | null>;
-  private genCharacters: (hint?: string) => Promise<SeriesCharacter[] | null>;
-  private genChapters: (target?: number) => Promise<Chapter[] | null>;
-  private breakdownPage: (pageId: string) => Promise<SeriesPage | null>;
-  private generatePage: (pageId: string) => Promise<SeriesPage | null>;
-  private regeneratePage: (pageId: string) => Promise<SeriesPage | null>;
-  private rewritePage: (pageId: string, instruction: string) => Promise<SeriesPage | null>;
-  private continueNextPage: (pageId: string) => Promise<SeriesPage | null>;
-  private deleteCharacter: (id: string) => Promise<void>;
-  private selectPage: (id: string | null) => void;
-  private getSelectedPageId: () => string | null;
+  //
+  // 全部用 definite assignment (`!`) 声明：这些字段不在构造函数里赋值，而是由
+  // React 层通过 setDeps() 在首帧渲染时注入。`!` 在此准确表达"外部保证初始化"，
+  // 而不是掩盖一个真的忘了赋值的 bug —— 若某个 dep 未被注入，运行时会在第一次
+  // 调用时抛 "is not a function"，而不是静默走错分支。
+  private getSeries!: () => Series | null;
+  private ensureSeries!: (input: { title: string; logline: string }) => Promise<Series>;
+  private patchSeries!: (patch: Partial<Pick<Series, 'title' | 'logline'>>) => Promise<Series | null>;
+  private genWorldview!: (hint?: string) => Promise<Worldview | null>;
+  private genCharacters!: (hint?: string) => Promise<SeriesCharacter[] | null>;
+  private genChapters!: (target?: number) => Promise<Chapter[] | null>;
+  private breakdownPage!: (pageId: string) => Promise<SeriesPage | null>;
+  private generatePage!: (pageId: string) => Promise<SeriesPage | null>;
+  private regeneratePage!: (pageId: string) => Promise<SeriesPage | null>;
+  private rewritePage!: (pageId: string, instruction: string) => Promise<SeriesPage | null>;
+  private continueNextPage!: (pageId: string) => Promise<SeriesPage | null>;
+  private deleteCharacter!: (id: string) => Promise<void>;
+  private selectPage!: (id: string | null) => void;
+  private getSelectedPageId!: () => string | null;
   // —— 话级模型（2026-09-02） ——
-  private genArcs: () => Promise<Arc[] | null>;
-  private genArcChapters: (arcId: string, opts?: { targetPageCount?: number; hint?: string }) => Promise<Chapter[] | null>;
-  private generatePanel: (pageId: string, panelIndex: number) => Promise<SeriesPage | null>;
-  private selectEpisode: (chapterId: string | null) => void;
-  private getSelectedEpisodeId: () => string | null;
+  private genArcs!: () => Promise<Arc[] | null>;
+  private genArcChapters!: (arcId: string, opts?: { targetPageCount?: number; hint?: string }) => Promise<Chapter[] | null>;
+  private generatePanel!: (pageId: string, panelIndex: number) => Promise<SeriesPage | null>;
+  private selectEpisode!: (chapterId: string | null) => void;
+  private getSelectedEpisodeId!: () => string | null;
 
   /** 一组 dep 函数。React 层每次重渲染都重新构造 deps 并调用此方法。 */
   setDeps(deps: {

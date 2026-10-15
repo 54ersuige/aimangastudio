@@ -11,6 +11,7 @@ import React, { useEffect, useState } from 'react';
  */
 import type { SeriesCharacter, Chapter, SeriesPage, Panel, CharacterGender, CharacterAgeBand } from '../types';
 import { CHARACTER_GENDERS, CHARACTER_AGE_BANDS } from '../types';
+import type { PanelInput } from '../services/seriesClient';
 
 /** 性别枚举 → 中文 UI 标签（2026-09-01 新增，集中一处避免散落）。 */
 const GENDER_LABEL: Record<CharacterGender, string> = {
@@ -592,7 +593,7 @@ export function PanelsEditor({
   open: boolean;
   page: SeriesPage | null;
   onClose: () => void;
-  onSavePanels: (panels: SeriesPage['panels']) => Promise<void>;
+  onSavePanels: (panels: PanelInput[]) => Promise<void>;
   onInsertPanel: (insertAt: number) => Promise<void>;
   onDeletePanel: (panelId: string) => Promise<void>;
 }) {
@@ -629,7 +630,13 @@ export function PanelsEditor({
   };
   const save = async () => {
     setBusy(true);
-    try { await onSavePanels(draft.map(p => ({ ...p, index: undefined }))); setDirty(false); onClose(); } finally { setBusy(false); }
+    try {
+      // index 抹掉交给后端按数组位置重编号（ReplacePanelsSchema.index 可选）。
+      // 注：draft 在 move/remove/insertLocal 三处都已重新映射过 index，
+      // 这里抹掉其实是冗余的；但删除属于行为变更，未随本次 strict 改造一并执行。
+      await onSavePanels(draft.map(p => ({ ...p, index: undefined })));
+      setDirty(false); onClose();
+    } finally { setBusy(false); }
   };
   return (
     <ModalShell

@@ -251,6 +251,9 @@ export function PublisherModal(props: PublisherModalProps): React.ReactElement |
   const toggleImportPanel = (page: SeriesPage, panelIndex: number) => {
     const panel = page.panels.find(p => p.index === panelIndex);
     if (!panel?.imageUrl) return;
+    // 提到闭包外：TS 不会把属性收窄（panel.imageUrl 为 string）带进 setDraft 回调，
+    // 在回调里直接用 panel.imageUrl 会退化成 string | undefined 而报错。
+    const imageUrl = panel.imageUrl;
     setDraft(d => {
       if (!d) return d;
       const key = `${page.id}:${panelIndex}`;
@@ -266,7 +269,7 @@ export function PublisherModal(props: PublisherModalProps): React.ReactElement |
         kind: 'panel',
         pageId: page.id,
         panelIndex,
-        imageUrl: panel.imageUrl,
+        imageUrl,
         dialogue: panel.dialogue,
         narration: panel.narration,
         innerThought: panel.innerThought,

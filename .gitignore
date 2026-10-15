@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# npm 缓存（2026-10-15：曾误入库 35 个文件 / 2.3MB）
+.npm-cache/
+
 # 敏感配置（含 API key，永不入库）
 .env
 server/runtime-config.json
@@ -31,6 +34,12 @@ server/data/
 **/agent-smoke.ts
 **/probe*.ts
 **/probe*.cjs
+
+# 画风对照实验的输出图片（2026-10-15：曾入库 28 张 / 80MB）。
+# 由 tools/style-bakeoff.mjs 等脚本重新生成，属于产物不是源码；
+# 结论已沉淀在 docs/style-dna/*.md 与 server/dna/*.ts，无需入库。
+tools/style-bakeoff/
+tools/style-candidates/
 
 # Editor directories and files
 .vscode/*

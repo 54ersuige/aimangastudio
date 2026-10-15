@@ -131,8 +131,11 @@ export function analyzeCompliance(draft: ArticleDraft): ComplianceReport {
   }
 
   // 原文 / 转载
-  if (draft.author.trim()) {
-    checks.push({ label: '原创声明', detail: `已署名：${draft.author.trim()}`, level: 'good', score: 5, maxScore: 5 });
+  // 2026-10-15：author 在 Draft 上是可选字段，原代码直接 .trim() 会在未署名时
+  // 抛 TypeError，连带整个合规检查面板崩掉。收敛成一次安全取值。
+  const author = (draft.author ?? '').trim();
+  if (author) {
+    checks.push({ label: '原创声明', detail: `已署名：${author}`, level: 'good', score: 5, maxScore: 5 });
   } else {
     checks.push({ label: '原创声明', detail: '未填写作者，公众号可能默认非原创', level: 'warning', score: 2, maxScore: 5 });
     issues.push('填写作者可在公众号后台勾选"原创"声明。');

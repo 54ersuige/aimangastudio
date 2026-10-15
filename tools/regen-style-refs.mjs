@@ -6,7 +6,14 @@
 import fs from 'fs';
 import path from 'path';
 
-const API_KEY = process.env.IMAGE_API_KEY || '';
+// 2026-10-15：原先此处硬编码明文 API key（且已随文件进入 git 历史）。
+// 改为读环境变量，与项目 .env 约定一致（IMAGE_API_KEY）。
+// 注意：key 已泄露在历史提交里，仍需在服务端吊销并重发。
+const API_KEY = process.env.IMAGE_API_KEY || process.env.TEXT_API_KEY;
+if (!API_KEY) {
+  console.error('缺少 IMAGE_API_KEY。请在 .env 中配置后重试：IMAGE_API_KEY=xxx');
+  process.exit(1);
+}
 const BASE_URL = 'https://apihub.agnes-ai.cn/v1';
 const OUT = path.join(process.cwd(), 'tools', 'style-candidates');
 

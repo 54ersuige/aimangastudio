@@ -5,11 +5,19 @@ import { resolve } from 'path';
 
 const BASE = 'http://127.0.0.1:3001';
 
+// 2026-10-15：原先此处硬编码明文 API key（且已随文件进入 git 历史）。
+// 改为读环境变量。key 仍需在服务端吊销并重发。
+const API_KEY = process.env.IMAGE_API_KEY || process.env.TEXT_API_KEY;
+if (!API_KEY) {
+  console.error('缺少 IMAGE_API_KEY。请在 .env 中配置后重试：IMAGE_API_KEY=xxx');
+  process.exit(1);
+}
+
 // 1) 直接调 agnes 时如果不传 negative_prompt —— 跟当前后端代码对比
 async function agnesImageCall(body) {
   const r = await fetch('https://apihub.agnes-ai.cn/v1/images/generations', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ***REMOVED***' },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}` },
     body: JSON.stringify(body),
   });
   return { status: r.status, body: (await r.text()).slice(0, 300) };

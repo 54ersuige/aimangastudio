@@ -43,7 +43,10 @@ export function snapshotChapter(chapter: Chapter): ChapterSnapshot {
     const pg = pages[i];
     const panels = pg.panels;
     for (let j = panels.length - 1; j >= 0; j -= 1) {
-      if (panels[j].dialogue && !lastDialogue) lastDialogue = panels[j].dialogue;
+      // 取到局部变量再收窄：dialogue 是 string | undefined，直接在条件里判完再赋值
+      // 无法让 TS 认出它已是 string。
+      const dialogue = panels[j].dialogue;
+      if (dialogue && !lastDialogue) lastDialogue = dialogue;
     }
     if (!lastScene && pg.sceneDescription) lastScene = pg.sceneDescription.slice(0, 80);
     if (lastDialogue && lastScene) break;

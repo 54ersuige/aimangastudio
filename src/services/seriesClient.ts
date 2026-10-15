@@ -61,6 +61,13 @@ async function request<T>(input: string, init: RequestInit = {}): Promise<T> {
 // 由本封装轮询直到完成 —— 对上层调用方完全透明，签名不变。
 
 const TASK_POLL_INTERVAL = 2000;
+/**
+ * postTask 默认最大等待时间（10 分钟）。
+ * 超过则认为任务"丢失"（服务重启 / 网络异常 / 后端 OOM），抛错让 UI 提示用户。
+ * 单独出图实际耗时通常 30~120 秒（6 格按 6×30s 算），10 分钟是宽松上限。
+ * 2026-09-18 新增。
+ */
+const TASK_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 
 interface TaskState {
   id: string;
@@ -68,17 +75,36 @@ interface TaskState {
   status: 'running' | 'done' | 'error';
   result?: unknown;
   error?: string;
+  /** 进度 0-100，仅 running 时更新。 */
+  progress?: number;
+}
+
+export interface PostTaskOptions {
+  /** 超时（毫秒），默认 10 分钟。 */
+  timeoutMs?: number;
+  /**
+   * 进度回调（每 2 秒一次）。可用于上层做进度条 / toast。
+   * 仅在 status='running' 且 progress 字段存在时回调。
+   */
+  onProgress?: (progress: number, kind: string) => void;
 }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-async function postTask<T>(path: string, body?: unknown): Promise<T> {
+export async function postTask<T>(path: string, body?: unknown, opts: PostTaskOptions = {}): Promise<T> {
+  const timeoutMs = opts.timeoutMs ?? TASK_DEFAULT_TIMEOUT_MS;
   const startRes = await request<{ taskId: string }>(path, {
     method: 'POST',
     body: JSON.stringify(body || {}),
   });
   const taskId = startRes.taskId;
+  const startedAt = Date.now();
   for (;;) {
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error(
+        `任务等待超时（${Math.round(timeoutMs / 1000)}s 未完成）。可能是服务重启，请重新发起生成。`,
+      );
+    }
     await sleep(TASK_POLL_INTERVAL);
     let task: TaskState;
     try {
@@ -86,6 +112,9 @@ async function postTask<T>(path: string, body?: unknown): Promise<T> {
       task = res.task;
     } catch (e: any) {
       throw new Error(e.message || '任务查询失败（服务可能已重启），请重新发起生成');
+    }
+    if (typeof task.progress === 'number' && opts.onProgress) {
+      try { opts.onProgress(task.progress, task.kind); } catch { /* ignore */ }
     }
     if (task.status === 'done') return task.result as T;
     if (task.status === 'error') throw new Error(task.error || '任务执行失败');
@@ -128,17 +157,48 @@ export async function generateCharacters(seriesId: string, hint?: string): Promi
   return postTask(`/api/series/${seriesId}/characters/generate`, { hint });
 }
 
-export async function addCharacter(seriesId: string, input: {
+/**
+ * 新增角色的入参。字段与后端 `AddCharacterSchema`
+ * （server/series-routes/characters.ts）一一对应。
+ *
+ * 2026-10-15：此前这段内联类型在三个地方各写了一份且互不一致 ——
+ * seriesClient / SeriesContext 的 interface / addChar 实现处。
+ * SeriesContext 那份漏掉了 visualAnchors，导致 SeriesWorkbench 手动加角色时
+ * 传 visualAnchors 触发 TS2353（严格模式下直接报错，宽松模式下则一直没人发现）。
+ * 现统一到单一事实源。
+ */
+export interface AddCharacterInput {
   name: string;
   role: 'protagonist' | 'antagonist' | 'supporting';
   description: string;
   appearance: string;
-  voiceTone?: string;
-  // 2026-09-01 新增：手动添加角色时也允许指定性别 / 年龄段，这是"图片里男女老少一目了然"的第一道闸门。
+  roleInStory?: string;
+  /** 2026-09-01：性别 / 年龄段 —— "图片里男女老少一目了然"的第一道闸门。 */
   gender?: CharacterGender;
   ageBand?: CharacterAgeBand;
+  /** 高辨识度视觉锚点，生图 prompt 每页强制带入；驱动跨页角色一致性。 */
+  visualAnchors?: string[];
+  /** 【服装唯一事实源】只能写一套确定装束，禁止写"逐渐变成/分场合切换"。 */
+  outfit?: string;
+  hair?: string;
+  eyes?: string;
+  height?: string;
+  build?: string;
+  signature?: string;
+  personality?: string;
+  occupation?: string;
+  backstory?: string;
+  motivation?: string;
+  goal?: string;
+  arc?: string;
+  catchphrase?: string;
+  voice?: string;
+  /** 兼容旧前端：仍可传 voiceTone，后端会自动合并到 voice 字段。 */
+  voiceTone?: string;
   autoGenerateImage?: boolean;
-}): Promise<{ character: SeriesCharacter }> {
+}
+
+export async function addCharacter(seriesId: string, input: AddCharacterInput): Promise<{ character: SeriesCharacter }> {
   return request(`/api/series/${seriesId}/characters`, { method: 'POST', body: JSON.stringify(input) });
 }
 
@@ -291,8 +351,20 @@ export async function rewritePanelText(
   });
 }
 
+/**
+ * 手动保存 panels 时的上行载荷。
+ *
+ * 与后端 `ReplacePanelsSchema`（server/series-routes/pages.ts）一致：`index` 是
+ * **可选**的，缺省时后端按数组位置重新编号。
+ *
+ * 2026-10-15：此前这里声明成 `Panel[]`（`Panel.index` 是必填 number），但手动编辑
+ * 保存时前端会刻意把 index 抹掉交给后端编号 —— 类型与实际发出的报文不一致，
+ * 开 strict 后直接报错。改为显式区分"线上载荷"与"存储模型"。
+ */
+export type PanelInput = Omit<Panel, 'index'> & { index?: number };
+
 /** 手动编辑：整体替换 panels（增删改全部 panel 后调一次）。 */
-export async function replacePanels(seriesId: string, pageId: string, panels: Panel[]): Promise<{ page: SeriesPage }> {
+export async function replacePanels(seriesId: string, pageId: string, panels: PanelInput[]): Promise<{ page: SeriesPage }> {
   return request(`/api/series/${seriesId}/pages/${pageId}/panels`, { method: 'PUT', body: JSON.stringify({ panels }) });
 }
 

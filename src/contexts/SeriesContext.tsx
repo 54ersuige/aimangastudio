@@ -41,6 +41,7 @@ import {
   updatePanelText as apiUpdatePanelText,
   rewritePanelText as apiRewritePanelText,
 } from '../services/seriesClient';
+import type { AddCharacterInput } from '../services/seriesClient';
 import type { Arc } from '../types';
 
 interface SeriesContextValue {
@@ -62,14 +63,7 @@ interface SeriesContextValue {
   generateWorldviewForCurrent: (hint?: string) => Promise<Worldview | null>;
   // Step 2 → Step 3
   generateCharactersForCurrent: (hint?: string) => Promise<SeriesCharacter[] | null>;
-  addCharacterToCurrent: (input: {
-    name: string;
-    role: 'protagonist' | 'antagonist' | 'supporting';
-    description: string;
-    appearance: string;
-    voiceTone?: string;
-    autoGenerateImage?: boolean;
-  }) => Promise<SeriesCharacter | null>;
+  addCharacterToCurrent: (input: AddCharacterInput) => Promise<SeriesCharacter | null>;
   updateCharacterInCurrent: (id: string, patch: Partial<SeriesCharacter>) => Promise<void>;
   deleteCharacterFromCurrent: (id: string) => Promise<void>;
   regenerateCharacterImageInCurrent: (id: string) => Promise<void>;
@@ -126,7 +120,7 @@ interface SeriesContextValue {
    * 比 LLM 重画图便宜得多，是"我对这格的文字不满意"的标准修法。
    */
   rewritePanelTextInCurrent: (pageId: string, panelIndex: number, instruction: string) => Promise<void>;
-  replacePanelsInCurrent: (pageId: string, panels: import('../services/seriesClient').Panel[]) => Promise<void>;
+  replacePanelsInCurrent: (pageId: string, panels: import('../services/seriesClient').PanelInput[]) => Promise<void>;
   insertPanelInCurrent: (pageId: string, insertAt?: number) => Promise<void>;
   deletePanelInCurrent: (pageId: string, panelId: string) => Promise<void>;
 }
@@ -297,14 +291,7 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
     }
   }, [currentSeries, refreshCurrent]);
 
-  const addChar = useCallback(async (input: {
-    name: string;
-    role: 'protagonist' | 'antagonist' | 'supporting';
-    description: string;
-    appearance: string;
-    voiceTone?: string;
-    autoGenerateImage?: boolean;
-  }) => {
+  const addChar = useCallback(async (input: AddCharacterInput) => {
     if (!currentSeries) return null;
     setBusy(true); setError(null);
     try {
@@ -675,7 +662,7 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
     }
   }, [currentSeries, refreshCurrent]);
 
-  const replacePanelsInCurrent = useCallback(async (pageId: string, panels: import('../services/seriesClient').Panel[]) => {
+  const replacePanelsInCurrent = useCallback(async (pageId: string, panels: import('../services/seriesClient').PanelInput[]) => {
     if (!currentSeries) return;
     try {
       await apiReplacePanels(currentSeries.id, pageId, panels);

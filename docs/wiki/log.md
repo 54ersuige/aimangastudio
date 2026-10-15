@@ -2,6 +2,34 @@
 
 > 重构动作日志，append-only。格式：`## [YYYY-MM-DD] action | subject`
 
+## [2026-10-15] baseline | 地基工程：typecheck / strict / 测试
+- **typecheck 接线**：root 与 server 各加 `typecheck` script，root 加 `npm run check` 一次跑两端。此前 typecheck 没有任何入口，等于前端完全没有类型保护
+- **根因修复（最大单点收益）**：`@types/react` / `@types/react-dom` 从未安装，且 `tsconfig.json` 的 `"types": ["node"]` 把 React 类型整个切掉。开 strict 后前端一次性冒出 **2229 个错误**，其中 1890 个是 TS7026（JSX 无类型声明）—— 即"缺一个 devDependency"，不是 1890 个代码缺陷。装上 + 修正 types 后降到 **30 个**
+- **开启 `strict`**：30 个错误全清，前后端 `tsc --noEmit` 均 exit 0。分三类修：
+  - `agentEngine.ts` 19 处 TS2564 —— `setDeps` 注入的依赖改用 definite assignment (`!`) 声明
+  - `addCharacter` 入参类型三处内联副本互不一致（seriesClient / SeriesContext interface / addChar 实现），SeriesContext 那份漏 `visualAnchors` → 提取为 `AddCharacterInput` 单一事实源
+  - `replacePanels` 载荷类型与实际报文不符（前端刻意抹掉 index 交给后端编号）→ 新增 `PanelInput`（index 可选）与 `ReplacePanelsSchema` 对齐
+- **修掉一个真 bug**：`platformCompliance.ts` 的 `draft.author.trim()` —— `ArticleDraft.author` 是可选字段，未署名时打开合规面板直接抛 TypeError，连带整个面板崩掉。收敛为 `(draft.author ?? '').trim()`
+- **引入 vitest**（root devDep + `vitest.config.ts` + `npm test`），首批 **31 个回归测试**覆盖契约层与任务队列。重点锁住两条易被"顺手重构"掉的行为：
+  - `validatePanel`：description < 60 字是 **repairable 而非 fatal**（2026-09-18 改动），且 `repairable` 聚合语义——混入任一 fatal 则整体不可修复
+  - `task-queue`：同 key 互斥、progress 仅 running 期可上报且夹到 0-100、30 分钟 TTL 惰性清理、listTasks 不泄露内部 key
+- 验证：`npm run check` exit 0；`npx vitest run` 31 passed；`npm run build` exit 0
+
+## [2026-10-15] cleanup | 死代码与仓库瘦身
+- 删除已入库且严重过期的备份：`server/series-routes/{helpers,pages,prompts}.ts.bak-focus-2026-09-03`（prompts 版差 619 行）、`server/tsc-out.txt`（0 字节）
+- 删除 21 个一次性调试脚本（tools/probe-*、watch-page / reset-page / wait-task / list-procs，以及根目录 3 个与 `start.ps1` 功能重叠的 start-*.ps1）
+- 仓库瘦身：`tools/style-bakeoff/` 28 张对照 PNG 共 **80MB**（是 `style-bakeoff.mjs` 等脚本的可再生产物，结论已沉淀进 `docs/style-dna/*.md` 与 `server/dna/*.ts`）；`.npm-cache/` 35 个缓存文件 2.3MB。两项均加入 `.gitignore`
+- **安全**：移除 `tools/bug-confirm.mjs` / `tools/regen-style-refs.mjs` 中硬编码的明文 API key，改读 `IMAGE_API_KEY` 环境变量。⚠️ 该 key 已存在于 `b5b7255` / `01d5086` / `23c84eb` 三个提交，**仍需在服务端吊销并重发**
+- 清理全部走 mavis-trash（可恢复）；入库文件亦可 `git checkout` 取回
+
+## [2026-10-15] incident | 待用户决策：characters PATCH 路由遮蔽
+- **现象**：`server/series-routes/characters.ts` 注册了**两个** `PATCH /series/:id/characters/:characterId`
+  - `:344` 窄版 schema（仅 `name/role/description/appearance/voiceTone/referenceImage`），末尾 `res.json()`，从不调 `next()`
+  - `:391` 完整 `UpdateCharacterSchema`（含 `visualAnchors/gender/ageBand/outfit/personality/motivation/archetype/referenceImages`）+ 2026-09-07 加的 `validateCharacter` 契约校验
+- **后果**：Express 先注册的先响应 → 窄版永远生效，`:391` 起整段是死代码。Zod v3 的 `z.object()` 默认**剥离**未声明字段，因此改角色的视觉锚点 / 性别 / 服装会**返回 200 但字段被静默丢弃**
+- 这正好打在"角色跨页一致性"这个反复出现的痛点上。`log.md` 2026-09-01 条目记过"characters 重复 PATCH 路由（pre-existing，未改）"，但当时只当重复路由记，未评估影响
+- 按 wiki `Update Policy`「发现 pre-existing bug：不改，记 known-issue，报给用户决定」—— 已上报，**未改动**
+
 ## [2026-09-03] behavior-change | 层级术语彻底统一：季→话→格，清除 卷/章/页
 - 用户决策：按公众号连载漫画最佳实践（作品→季→话→格），章/卷是小说概念不用，页仅内部批次
 - 根因：prompt 术语污染——worldview 写「2-6 季/卷」、chapters 标题示例「第一章 觉醒」→ LLM 生成的 arc 标题带「卷」、话标题带「第一章」，与 UI「第X季/第X话」标签套娃
