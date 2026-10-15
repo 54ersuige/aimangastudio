@@ -14,6 +14,7 @@ import {
   judgePanel,
   needsLimbRepair,
   gateToAuditFields,
+  isAlignmentAcceptable,
   LIMB_CONFIDENCE_FLOOR,
   type PanelGateResult,
 } from './panel-gate.js';
@@ -142,9 +143,26 @@ describe('judgePanel —— 判定规则与拆分版一致', () => {
     expect(judgePanel(g, { alignmentItems: null }).ok).toBe(false);
   });
 
-  it('review overall 70 → 通过 / 69 → 不通过（REGENERATE_THRESHOLD=70 未被改动）', () => {
-    expect(judgePanel({ ...okGate, review: review(70) }, { alignmentItems: null }).ok).toBe(true);
-    expect(judgePanel({ ...okGate, review: review(69) }, { alignmentItems: null }).ok).toBe(false);
+  it('review overall 78 → 通过 / 77 → 不通过（REGENERATE_THRESHOLD=78）', () => {
+    expect(judgePanel({ ...okGate, review: review(78) }, { alignmentItems: null }).ok).toBe(true);
+    expect(judgePanel({ ...okGate, review: review(77) }, { alignmentItems: null }).ok).toBe(false);
+  });
+
+  it('对齐：3 项画 2 项（67%）→ 通过，不再触发重画', () => {
+    // 这正是实跑里烧满 3 次重试的那一格：只缺「双手握着背包肩带」。
+    const g: PanelGateResult = {
+      ...okGate,
+      alignment: { ok: true, items: ['a', 'b', 'c'], missing: [], reason: '', confidence: 0.67 },
+    };
+    expect(judgePanel(g, { alignmentItems: ['a', 'b', 'c'] }).ok).toBe(true);
+  });
+
+  it('对齐：过半没画出来 → 才不通过', () => {
+    const g: PanelGateResult = {
+      ...okGate,
+      alignment: { ok: false, items: ['a', 'b', 'c', 'd'], missing: ['c', 'd'], reason: '缺：c、d', confidence: 0.5 },
+    };
+    expect(judgePanel(g, { alignmentItems: ['a', 'b', 'c', 'd'] }).ok).toBe(false);
   });
 
   it('alignment 缺一项 → 不通过；无清单时 alignment 判定被跳过', () => {
@@ -258,5 +276,32 @@ describe('gateToAuditFields —— 审计字段必须每轮全覆盖', () => {
   it('alignment 的 items 优先取本轮抽取的清单', () => {
     const f = gateToAuditFields(dirtyGate, ['桌角', '纸角']);
     expect(f.alignmentAudit?.items).toEqual(['桌角', '纸角']);
+  });
+});
+
+describe('isAlignmentAcceptable —— 判据是「故事讲得清」不是「一个不漏」', () => {
+  it('没有清单 → 不参与判定', () => {
+    expect(isAlignmentAcceptable(0, 0)).toBe(true);
+  });
+
+  it('一项都没画出来 → 不通过（画面根本没对上文本，值得重来一次）', () => {
+    expect(isAlignmentAcceptable(0, 3)).toBe(false);
+  });
+
+  it('呈现率 ≥ 60% → 通过', () => {
+    expect(isAlignmentAcceptable(2, 3)).toBe(true);  // 67%
+    expect(isAlignmentAcceptable(3, 4)).toBe(true);  // 75%
+    expect(isAlignmentAcceptable(5, 5)).toBe(true);  // 全中
+  });
+
+  it('呈现率 < 60% → 不通过', () => {
+    expect(isAlignmentAcceptable(1, 3)).toBe(false); // 33%
+    expect(isAlignmentAcceptable(2, 4)).toBe(false); // 50%
+    expect(isAlignmentAcceptable(1, 2)).toBe(false); // 50%
+  });
+
+  it('单项清单：画出来才算（1/1=100% 通过，0/1 不通过）', () => {
+    expect(isAlignmentAcceptable(1, 1)).toBe(true);
+    expect(isAlignmentAcceptable(0, 1)).toBe(false);
   });
 });

@@ -32,9 +32,21 @@ import { logGeneration } from './utils.js';
 
 // ── 第一步：从 description 抽取可核验实体要素 ──────────────────────────────
 
+/**
+ * 2026-10-15 实测修正：模型**稳定返回** `{"items":["文本", ...]}`（纯字符串数组），
+ * 而原来的 schema 要求 `{"items":[{"text":"..."}]}`（对象数组）——
+ * 于是每一次抽取都 zod 失败走 null 分支，对齐闸实际处于**完全静默失效**状态。
+ * 实测日志里 alignment-extract-schema-fail 累计 15 次，而审计记录 alignmentAudit 恒为 null。
+ *
+ * 修法：schema 同时接受两种形状（z.union），prompt 也改成模型自然会给的简单形式。
+ * 不改成"只认一种"——那是把容错换成了另一种单点故障。
+ */
 const AlignmentItemsZ = z.object({
-  /** 每个要素 ≤ 40 字，必须是"画面里看得出有/没有"的实词。 */
-  items: z.array(z.object({ text: z.string().min(2).max(40) })).max(5),
+  /** 每项 ≤ 40 字，必须是"画面里看得出有/没有"的实词。字符串或 {text} 对象都接受。 */
+  items: z.array(z.union([
+    z.string().min(2).max(40),
+    z.object({ text: z.string().min(2).max(40) }),
+  ])).max(5),
 });
 
 /** 抽取结果：核验要素清单；null = 抽取失败（调用方跳过本格门禁）。 */
@@ -60,7 +72,7 @@ export async function extractAlignmentItems(
     '严禁抽取：情绪、心理、视线方向（除非描述明确写"看着某物"且是该格的焦点）、颜色、光线氛围、画风词汇。',
     '严禁添加 description 里没有的内容 —— 核对项必须能在描述原文里找到依据。',
     '',
-    '输出严格 JSON：{"items": [{"text": "..."}, ...]}',
+    '输出严格 JSON：{"items": ["要素一", "要素二"]}',
   ].join('\n');
   try {
     const resp = await provider.generateText(cfg, {
@@ -82,7 +94,9 @@ export async function extractAlignmentItems(
       logGeneration('alignment-extract-schema-fail', { error: v.error.message.slice(0, 200) });
       return null;
     }
-    const items = v.data.items.map(i => i.text.trim()).filter(Boolean);
+    const items = v.data.items
+      .map(i => (typeof i === 'string' ? i : i.text).trim())
+      .filter(Boolean);
     return items.length > 0 ? { items } : null;
   } catch (e: any) {
     logGeneration('alignment-extract-error', { error: String(e?.message || e).slice(0, 300) });

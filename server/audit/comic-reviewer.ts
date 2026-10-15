@@ -325,8 +325,18 @@ function parseReviewerResponse(txt: string): PanelReview | null {
 function clamp01(n: number): number { return Math.max(0, Math.min(1, n)); }
 function clamp(n: number, lo: number, hi: number): number { return Math.max(lo, Math.min(hi, n)); }
 
-/** 阈值：总分 < 此值 → 触发自动重画。 */
-export const REGENERATE_THRESHOLD = 70;
+/**
+ * 阈值：总分 < 此值 → 触发自动重画。
+ *
+ * 2026-10-15：70 → 78。
+ * 依据是真实出图跑出来的数据，不是拍脑袋 ——
+ * 一次 6 格实跑里，审核给出的分数是 66 / 67 / 79 / 84，
+ * 但那几张图**故事说得清、情绪也对**（用户看过原图确认）。
+ * 70 的线会把这种图拖进重试，而每次重试 = 一次出图 + 一次审核 ≈ 2 分钟。
+ * 门槛定在"只有明显不合格才重来"，配合重试次数降到 1 次（见 prompts.ts
+ * MAX_TOTAL_ATTEMPTS），最坏情况也不会停滞。
+ */
+export const REGENERATE_THRESHOLD = 78;
 
 /**
  * 总结一次评审的失败原因（用于审计 + UI）。

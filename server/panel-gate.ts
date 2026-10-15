@@ -335,17 +335,20 @@ function parseGender(p: any, expected: 'female' | 'male' | 'ambiguous'): GenderA
 function parseAlignment(p: any, items: string[]): AlignmentAudit | null {
   const a = p?.alignment;
   if (!a || !Array.isArray(a.results) || a.results.length === 0) return null;
+  const present = a.results.filter((r: any) => r && r.present === true);
   const missing = a.results
     .filter((r: any) => r && r.present !== true)
     .map((r: any) => String(r.text || '').trim())
     .filter(Boolean);
+  const ok = isAlignmentAcceptable(present.length, a.results.length);
   return {
-    // 硬标准：缺任意 1 项 → 不达标（与原 verifyAlignment 一致）。
-    ok: missing.length === 0,
+    ok,
     items,
-    missing,
-    reason: missing.length > 0 ? `缺：${missing.slice(0, 3).join('、')}` : '',
-    confidence: a.results.length > 0 ? clamp01(a.results.filter((r: any) => r?.present === true).length / a.results.length) : 0,
+    // 只在真的不达标时才记缺失项：达标但漏了一两个是正常的，
+    // 全量塞进审计只会让人以为出了大问题。
+    missing: ok ? [] : missing,
+    reason: ok ? '' : `缺：${missing.slice(0, 3).join('、')}`,
+    confidence: a.results.length > 0 ? clamp01(present.length / a.results.length) : 0,
   };
 }
 
@@ -488,8 +491,12 @@ export async function runPanelGate(input: PanelGateInput): Promise<PanelGateResu
 
 // ── 判定规则（与拆分版逐字一致，上游共用，避免两处漂移）────────────────────
 
-/** 肢体：置信度 ≥ 0.6 才算异常（低置信度误报会白白丢掉整张图）。 */
-export const LIMB_CONFIDENCE_FLOOR = 0.6;
+/**
+ * 肢体：置信度 ≥ 0.7 才算异常（2026-10-15 由 0.6 上调）。
+ * 低置信度的"疑似多一根手指"会触发 inpaint 局部重画 —— 而局部重画本身
+ * 有可能把原本没问题的区域改坏，代价远大于收益。宁可放过，不可改坏。
+ */
+export const LIMB_CONFIDENCE_FLOOR = 0.7;
 
 export interface GateVerdict {
   ok: boolean;
@@ -529,6 +536,27 @@ export function needsLimbRepair(gate: PanelGateResult): LimbAudit | null {
   const l = gate.limb;
   if (!l || !l.abnormal || l.confidence < LIMB_CONFIDENCE_FLOOR) return null;
   return l.regions.length > 0 ? l : null;
+}
+
+/**
+ * 要素呈现率下限（2026-10-15，70 判据 → 60 判据）。
+ *
+ * 原来是「缺任意 1 项 → 重画」。实跑里最离谱的一格是 3 个要素画出了 2 个
+ * （缺「双手握着背包肩带」），被判不达标、重画了 3 次 —— 而画面里人坐在工位上
+ * 手放在桌面，故事完全说得通。
+ *
+ * 现在的判据是用户真正在意的那句：**能讲清楚故事内容和情绪就行**。
+ * - 呈现率 ≥ 60% → 通过（3 项画 2 项 = 67% ✓）
+ * - 至少要画出来 1 项 → 全判 missing 说明模型没理解画面，值得重来一次
+ * - 全缺 / 低于 60% → 才重画
+ */
+export const ALIGNMENT_PRESENT_RATIO = 0.6;
+
+/** 由「画出来的项数 / 总项数」判达标。纯函数，便于测试与两个调用点共用。 */
+export function isAlignmentAcceptable(presentCount: number, totalCount: number): boolean {
+  if (totalCount <= 0) return true;      // 没有清单 → 不参与判定
+  if (presentCount <= 0) return false;  // 一项都没画出来 → 画面根本没对上文本
+  return presentCount / totalCount >= ALIGNMENT_PRESENT_RATIO;
 }
 
 /** gate → 审计字段的形状（与 PanelAuditRecord 中四个闸字段逐字对齐）。 */

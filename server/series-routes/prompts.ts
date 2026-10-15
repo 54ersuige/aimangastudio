@@ -1139,7 +1139,13 @@ async function generateOnePanelImage(args: GenerateOnePanelArgs): Promise<string
   // 任一不达标 → 重生成（最多 2 次），全部失败 → 用最后一次。
   // 每次都写一条审计记录（含 attempt / 不达标原因）。
   // 2026-10-15：四道闸合并为 1 次 vision 调用（server/panel-gate.ts）。
-  const MAX_TOTAL_ATTEMPTS = 3; // 1 次首试 + 最多 2 次重试
+  // 2026-10-15：3 → 2（首试 + 最多 1 次重试）。
+  //
+  // 一次 6 格实跑，5 格里有 4 格烧满了 3 次尝试，总耗时 126s~265s/格。
+  // 而用户看完原图的评价是「故事说得清、情绪也对」—— 那些重试基本是白花的。
+  // 门槛已同时下调（review 78 / 对齐 60% / 肢体 0.7），重画本身已很少触发；
+  // 再把上限压到 1 次，保证**即使不达标也只多花一轮**，不会出现"卡在重试里出不来"。
+  const MAX_TOTAL_ATTEMPTS = 2; // 1 次首试 + 最多 1 次重试
   let finalImage: string | null = null;
   let limbGuardResult: { abnormal: boolean; reason: string; confidence: number } | null = null;
   let genderResult: { mismatch: boolean; expected: string; observed: string[]; reason: string; confidence: number } | null = null;
@@ -1315,7 +1321,13 @@ async function generateOnePanelImage(args: GenerateOnePanelArgs): Promise<string
   }
 
   if (!finalImage) {
-    throw new Error(`分镜 ${panel.index} 三次尝试均失败`);
+    // 2026-10-15：次数由常量拼出来。原来写死「三次」，上限降到 2 之后
+    // 报错会骗用户（"三次尝试"根本没发生过），排查时会被带偏。
+    // 顺带把最后一次的具体失败原因带上 —— 光说"均失败"没法定位是图挂了还是审核挂了。
+    throw new Error(
+      `分镜 ${panel.index + 1} 连续 ${MAX_TOTAL_ATTEMPTS} 次出图均失败` +
+      (regenReason && regenReason !== 'ok' ? `：${regenReason}` : ''),
+    );
   }
 
   // 审计记录（2026-09-07 反馈层 P2）
