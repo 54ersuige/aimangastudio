@@ -70,7 +70,7 @@ export interface GenderAudit {
  * - enabled=false → 返回 null（视作通过，绝不阻塞主流程）
  * - apiKey / baseUrl 缺失 → 返回 null（优雅降级，不报 500）
  */
-async function callLimbAuditor(imageDataUrl: string): Promise<LimbAudit | null> {
+export async function callLimbAuditor(imageDataUrl: string): Promise<LimbAudit | null> {
   const cfg = getConfig().vision;
   if (!cfg.enabled) return null; // 用户没启用 → 跳过
   if (!cfg.apiKey || !cfg.baseUrl) {
@@ -246,50 +246,31 @@ function regionsAsPromptBlock(regions: LimbAudit['regions']): string {
     .join('\n');
 }
 
+/** repairLimbRegions 的返回。 */
+export interface LimbRepairResult {
+  /** 修复后的图；失败/未修复时为原图。 */
+  image: string;
+  /** 审计结果（与 guardedImage 返回同形，便于统一落盘）。 */
+  audit: { abnormal: boolean; reason: string; confidence: number };
+  /** 是否真的重画过（false = 原图直接放行）。 */
+  repaired: boolean;
+}
+
 /**
- * 对外接口：检查 + 就地修复一张图。
+ * 对已判定"肢体异常"的图做**局部 inpaint 修复**（2026-10-15 从 guardedImage 抽出）。
  *
- * @param originalWebOrDataUrl 原图（web 路径或 dataURL）
- * @param fallbackPrompt       用于 inpaint 的 prompt（建议简短）
- * @param dnaKey               DNA key（保留参数，便于日后让 inpaint 走同一套注入）
- * @returns  最终 dataURL + 审计结果（OK / 修复成功 / 修复失败退回，都给 dataURL）
- *           2026-09-07 反馈层 P2：返回审计结果，调用方可写到 panel-audit JSONL。
+ * 为什么抽出来：2026-10-15 之后分镜出图走「四闸合一」（server/panel-gate.ts），
+ * 肢体检测由合一闸一次返回，不再单独调 callLimbAuditor；但**修复动作**仍要保留 ——
+ * 它是唯一能把"已付费的好图"保住的手段（整张重抽＝再花钱 + 可能更差）。
+ * 于是：检测合并、修复独立。
+ *
+ * 入参要求：调用方已经拿到 LimbAudit（abnormal=true 且有 regions）。
  */
-export async function guardedImage(
-  originalWebOrDataUrl: string,
+export async function repairLimbRegions(
+  originalDataUrl: string,
+  initialAudit: LimbAudit,
   fallbackPrompt: string,
-  dnaKey: string,
-): Promise<{ image: string; audit: { abnormal: boolean; reason: string; confidence: number } | null }> {
-  // 1) 统一为 dataURL
-  const originalDataUrl = originalWebOrDataUrl.startsWith('data:')
-    ? originalWebOrDataUrl
-    : (imagePathToDataUrl(originalWebOrDataUrl) || '');
-  if (!originalDataUrl) return { image: originalWebOrDataUrl, audit: null };
-
-  // 2) 自检（多模态调用约 1-2s，失败/配错就静默跳过）
-  const initialAudit = await callLimbAuditor(originalDataUrl);
-  if (!initialAudit) return { image: originalDataUrl, audit: null }; // 巡检失败 → 视作通过
-  const initialAbnormal = initialAudit.abnormal && initialAudit.confidence >= 0.6;
-  if (!initialAbnormal || initialAudit.regions.length === 0) {
-    return {
-      image: originalDataUrl,
-      audit: {
-        abnormal: false,
-        reason: '',
-        confidence: initialAudit.confidence,
-      },
-    };
-  }
-
-  logGeneration('limb-guard-detected', {
-    people: initialAudit.people,
-    hands: initialAudit.hands,
-    arms: initialAudit.arms,
-    reason: initialAudit.reason,
-    regions: initialAudit.regions,
-    confidence: initialAudit.confidence,
-  });
-
+): Promise<LimbRepairResult> {
   // 3) 构造 inpaint prompt —— 极简但结构化
   const regionBlock = regionsAsPromptBlock(initialAudit.regions);
   const inpaintPrompt = [
@@ -335,6 +316,7 @@ export async function guardedImage(
             reason: `inpaint 失败退回原图：${postAudit.reason}`,
             confidence: postAudit.confidence,
           },
+          repaired: false,
         };
       }
       // 修复成功（自检通过 / 自检失败但至少不是恶化）
@@ -345,6 +327,7 @@ export async function guardedImage(
           reason: postAudit?.reason || '',
           confidence: postAudit?.confidence ?? initialAudit.confidence,
         },
+        repaired: true,
       };
     } catch (e: any) {
       console.warn(`[limb-guard] inpaint 第 ${attempt + 1} 次失败：${e?.message || e}`);
@@ -356,6 +339,7 @@ export async function guardedImage(
             reason: `inpaint 失败退回原图：${e?.message || e}`,
             confidence: initialAudit.confidence,
           },
+          repaired: false,
         };
       }
     }
@@ -367,5 +351,57 @@ export async function guardedImage(
       reason: 'inpaint 未启动重试',
       confidence: initialAudit.confidence,
     },
+    repaired: false,
   };
+}
+
+/**
+ * 对外接口：检查 + 就地修复一张图。
+ *
+ * @param originalWebOrDataUrl 原图（web 路径或 dataURL）
+ * @param fallbackPrompt       用于 inpaint 的 prompt（建议简短）
+ * @param dnaKey               DNA key（保留参数，便于日后让 inpaint 走同一套注入）
+ * @returns  最终 dataURL + 审计结果（OK / 修复成功 / 修复失败退回，都给 dataURL）
+ *           2026-09-07 反馈层 P2：返回审计结果，调用方可写到 panel-audit JSONL。
+ *
+ * 2026-10-15：分镜出图路径已改走「四闸合一」（server/panel-gate.ts），不再调本函数；
+ * 本函数保留给角色参考表（characters.ts）与风格参考图（prompts.ts:383）两条路径。
+ */
+export async function guardedImage(
+  originalWebOrDataUrl: string,
+  fallbackPrompt: string,
+  dnaKey: string,
+): Promise<{ image: string; audit: { abnormal: boolean; reason: string; confidence: number } | null }> {
+  // 1) 统一为 dataURL
+  const originalDataUrl = originalWebOrDataUrl.startsWith('data:')
+    ? originalWebOrDataUrl
+    : (imagePathToDataUrl(originalWebOrDataUrl) || '');
+  if (!originalDataUrl) return { image: originalWebOrDataUrl, audit: null };
+
+  // 2) 自检（多模态调用约 1-2s，失败/配错就静默跳过）
+  const initialAudit = await callLimbAuditor(originalDataUrl);
+  if (!initialAudit) return { image: originalDataUrl, audit: null }; // 巡检失败 → 视作通过
+  const initialAbnormal = initialAudit.abnormal && initialAudit.confidence >= 0.6;
+  if (!initialAbnormal || initialAudit.regions.length === 0) {
+    return {
+      image: originalDataUrl,
+      audit: {
+        abnormal: false,
+        reason: '',
+        confidence: initialAudit.confidence,
+      },
+    };
+  }
+
+  logGeneration('limb-guard-detected', {
+    people: initialAudit.people,
+    hands: initialAudit.hands,
+    arms: initialAudit.arms,
+    reason: initialAudit.reason,
+    regions: initialAudit.regions,
+    confidence: initialAudit.confidence,
+  });
+
+  const repaired = await repairLimbRegions(originalDataUrl, initialAudit, fallbackPrompt);
+  return { image: repaired.image, audit: repaired.audit };
 }

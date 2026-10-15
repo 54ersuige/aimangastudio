@@ -16,6 +16,7 @@
     "check": "npm run typecheck && npm run typecheck:server",
     "test": "vitest run",
     "test:watch": "vitest",
+    "gc:orphans": "cd server && npx tsx ../tools/orphan-sweep.ts",
     "postinstall": "cd server && npm install"
   },
   "dependencies": {

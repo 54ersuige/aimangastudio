@@ -1,7 +1,7 @@
 /**
  * 分镜出图审计（2026-09-07 反馈层 P1）。
  *
- * 设计目标：每出一张图，写一条 JSONL 记录到 server/logs/panel-audit/YYYY-MM-DD.jsonl，
+ * 设计目标：每出一张图，写一条 JSONL 记录到 server/data/audit/panel-audit/YYYY-MM-DD.jsonl，
  * 字段覆盖：
  *  - prompt 长度 / 参考图数 / styleRef 数 / DNA key
  *  - limb-guard 检测结果（多胳膊 / 多手指）
@@ -11,6 +11,12 @@
  *
  * JSONL 而不是 JSON：append-only，避免大文件读写放大；
  * UI 的「审计 Tab」读最近 N 条（默认 100）按 ts 倒序展示。
+ *
+ * 2026-10-15：落盘位置从 server/logs/ 改为 server/data/audit/。
+ * 原先写在 logs/ 下，而 logs/ 是「每次启动脚本清空」的临时目录 ——
+ * 实测审计记录已全部消失，导致「四道闸到底有没有用、重画有没有真的提分」
+ * 这类问题只能靠感觉回答。server/data/ 已在 .gitignore 内，
+ * 既是用户内容目录，又不会随启动清理。
  */
 import { createHash } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, appendFileSync, statSync, readdirSync } from 'fs';
@@ -18,10 +24,7 @@ import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
-// 2026-09-08 修复：本文件在 server/audit/ 下，日志根目录是 server/logs/
-// （之前 resolve(SERVER_DIR, 'logs') 会写进 server/audit/logs/，路径错一层）。
-const LOGS_DIR = resolve(SERVER_DIR, '..', 'logs');
-const AUDIT_DIR = resolve(LOGS_DIR, 'panel-audit');
+const AUDIT_DIR = resolve(SERVER_DIR, '..', 'data', 'audit', 'panel-audit');
 
 /** 单条审计记录。 */
 export interface PanelAuditRecord {

@@ -7,11 +7,14 @@ import { mapConcurrent } from '../concurrency.js';
 import { saveDataUrlImage, resolveImageData, loadStyleReferenceImages } from '../image-store.js';
 import { getImageProvider, iterAllChapters, callStructuredJson } from './helpers.js';
 import { z } from 'zod';
-import { guardedImage, checkGenderConsistency } from '../limb-guard.js';
+import { guardedImage } from '../limb-guard.js';
+import { repairLimbRegions } from '../limb-guard.js';
+import { runPanelGate, judgePanel, needsLimbRepair, gateToAuditFields, ALL_DIMENSIONS, type PanelGateResult } from '../panel-gate.js';
+import type { DimensionKey, PanelReview } from '../audit/comic-reviewer.js';
 import { validatePage, validateCharacter } from '../series-store/validate.js';
 import { appendPanelAudit, hashImageDataUrl, type PanelAuditRecord } from '../audit/panel-audit.js';
-import { reviewPanel, summarizeFailure, REGENERATE_THRESHOLD, DIMENSION_LABELS_ZH } from '../audit/comic-reviewer.js';
-import { extractAlignmentItems, verifyAlignment, type AlignmentAudit } from '../alignment-guard.js';
+import { REGENERATE_THRESHOLD, DIMENSION_LABELS_ZH } from '../audit/comic-reviewer.js';
+import { extractAlignmentItems, type AlignmentAudit } from '../alignment-guard.js';
 
 /**
  * 把「signature」里的持有型描述从角色参考图 prompt 中拆出来。
@@ -1132,15 +1135,19 @@ async function generateOnePanelImage(args: GenerateOnePanelArgs): Promise<string
       : null;
 
   // 2026-09-07 引擎层 P4：自动重生成闭环。
-  // 首张出图后跑 limb-guard + gender-audit；
+  // 首张出图后跑「四闸合一」（肢体 / 性别 / 8维评审 / 图文对齐）；
   // 任一不达标 → 重生成（最多 2 次），全部失败 → 用最后一次。
   // 每次都写一条审计记录（含 attempt / 不达标原因）。
+  // 2026-10-15：四道闸合并为 1 次 vision 调用（server/panel-gate.ts）。
   const MAX_TOTAL_ATTEMPTS = 3; // 1 次首试 + 最多 2 次重试
   let finalImage: string | null = null;
   let limbGuardResult: { abnormal: boolean; reason: string; confidence: number } | null = null;
   let genderResult: { mismatch: boolean; expected: string; observed: string[]; reason: string; confidence: number } | null = null;
-  // 2026-09-07 漫画审核大师：8 维评审结果（提升到循环外 —— 审计落盘在循环后引用）
+  // 8 维评审结果（提升到循环外 —— 审计落盘在循环后引用）
   let reviewResult: PanelAuditRecord['review'] = null;
+  // 2026-10-15：上一轮的完整评审对象。定向复审时用它继承未复核的维度分数，
+  // 保证审计里的 8 维分永远是**这张最终图的真实分**，不会因"这轮没问"而落到 5 分默认值。
+  let previousReview: PanelReview | null = null;
   // 2026-09-11 图文对齐门禁：每格先抽一次"可核验要素清单"（文本调用，一次即可），
   // 各 attempt 出图后逐项核对 —— 把"description 没画出来"变成可修正的重画信号。
   let alignmentItems: string[] | null = null;
@@ -1151,6 +1158,42 @@ async function generateOnePanelImage(args: GenerateOnePanelArgs): Promise<string
   } catch (e: any) {
     console.warn(`[generatePanelImages] 对齐要素抽取失败（跳过本格门禁）：${e?.message || e}`);
   }
+
+  // 2026-10-15：以下三项与 attempt 无关，提到循环外算一次。
+  // （原来每个 attempt 都重算一遍 refImagesForReview —— 会重复做 4 次 base64 解码。）
+  const characterSummaries = (panel.characterIds || [])
+    .slice(0, 6)
+    .map(cid => {
+      const c = series.characters.find(x => x.id === cid);
+      if (!c) return '';
+      // 简短的角色摘要：名字 + 性别 + 装束
+      return `${c.name}（${c.gender}，${c.ageBand}）：${(c.outfit || '').slice(0, 30)}`;
+    })
+    .filter(Boolean);
+  const refImagesForReview = (panel.characterIds || [])
+    .slice(0, 4)
+    .map(cid => {
+      const c = series.characters.find(x => x.id === cid);
+      if (!c) return null;
+      // 2026-09-08 修复：referenceImages/referenceImage 存的是 web 路径（/data/images/xx.png），
+      // 必须经 resolveImageData 转成 dataURL —— 直接塞路径会让网关尝试加载相对 URL 而报 500。
+      const raw = c.referenceImages?.[0] ?? c.referenceImage ?? null;
+      return raw ? resolveImageData(raw) : null;
+    })
+    .filter((s): s is string => !!s);
+  const worldviewStr = `${style} · ${mood}`;
+  // inpaint 用的基础 prompt（每轮相同，inpaint 会在其后面追加区域与硬约束）。
+  const inpaintBasePrompt = buildPanelImagePrompt({
+    style,
+    mood,
+    sceneDescription,
+    description: panel.description,
+    charDescLines,
+    boundCharNames,
+    anchorText,
+    extraCharacters: panel.extraCharacters,
+  });
+
   let regenReason = 'ok';
   let finalAttempt = 1; // 真实尝试次数（不能用 regenReason 正则解析 —— review(59) 里的 59 是评分不是次数）
   const t0 = Date.now();
@@ -1168,131 +1211,91 @@ async function generateOnePanelImage(args: GenerateOnePanelArgs): Promise<string
     }
     try {
       const img = await imageProvider.generateImage(config, finalReq);
-      // limb-guard（多胳膊 / 多手指）走局部 inpaint 修复
-      let candidate = img.image;
-      let localLimbAudit: { abnormal: boolean; reason: string; confidence: number } | null = null;
-      try {
-        const inpaintPrompt = buildPanelImagePrompt({
-          style,
-          mood,
-          sceneDescription,
-          description: panel.description,
-          charDescLines,
-          boundCharNames,
-          anchorText,
-          extraCharacters: panel.extraCharacters,
-        });
-        const guardResult = await guardedImage(img.image, inpaintPrompt, dnaKey);
-        candidate = guardResult.image;
-        localLimbAudit = guardResult.audit;
-      } catch (e: any) {
-        console.warn(`[generatePanelImages] limb-guard 流程异常，使用原图：${e?.message || e}`);
-      }
-      // 更新本次尝试的 limb-guard 结果（用于审计 + 是否重试）
-      limbGuardResult = localLimbAudit;
-      // gender-audit（仅在有 expectedGender 时跑）—— 不做 inpaint，仅判断
-      if (expectedGender) {
-        const ga = await checkGenderConsistency(candidate, expectedGender);
-        if (ga) {
-          genderResult = {
-            mismatch: ga.mismatch,
-            expected: ga.expectedGender,
-            observed: ga.observedGenders,
-            reason: ga.reason,
-            confidence: ga.confidence,
-          };
-        }
-      }
-      // 2026-09-07 漫画审核大师 P5：8 维评审（核心 —— 真审）
-      // 调用 vision provider 当主编，按 8 维评分；
-      // 总分 < REGENERATE_THRESHOLD(70) → 算不达标，需要重画。
-      // reviewResult 声明在循环外（审计落盘在循环后引用）。
-      const characterSummaries = (panel.characterIds || [])
-        .slice(0, 6)
-        .map(cid => {
-          const c = series.characters.find(x => x.id === cid);
-          if (!c) return '';
-          // 简短的角色摘要：名字 + 性别 + 装束
-          return `${c.name}（${c.gender}，${c.ageBand}）：${(c.outfit || '').slice(0, 30)}`;
-        })
-        .filter(Boolean);
-      const refImagesForReview = (panel.characterIds || [])
-        .slice(0, 4)
-        .map(cid => {
-          const c = series.characters.find(x => x.id === cid);
-          if (!c) return null;
-          // 2026-09-08 修复：referenceImages/referenceImage 存的是 web 路径（/data/images/xx.png），
-          // 必须经 resolveImageData 转成 dataURL —— 直接塞路径会让网关尝试加载相对 URL 而报 500。
-          const raw = c.referenceImages?.[0] ?? c.referenceImage ?? null;
-          return raw ? resolveImageData(raw) : null;
-        })
-        .filter((s): s is string => !!s);
-      const worldviewStr = `${style} · ${mood}`;
-      const review = await reviewPanel(candidate, {
+
+      // ── 四闸合一：一次 vision 调用同时返回 肢体 / 性别 / 8维评分 / 图文对齐 ──
+      // 2026-10-15 之前这里是 4 个独立调用（limb / gender / review / alignment），
+      // 其中 3 个读的是同一张图。现在合并为 1 次，判定阈值一字未改（见 judgePanel）。
+      //
+      // 分轮策略：第 2 轮起只复核上一轮"没到 8 分"的维度，其余维度由 previousReview 继承 ——
+      // 既省掉 6 维的输出与推理，又不会让审计里的分数退化成默认值。
+      const focusDimensions: DimensionKey[] | null = previousReview
+        ? (ALL_DIMENSIONS.filter(k => (previousReview?.dimensions[k]?.score ?? 0) < 8) as DimensionKey[])
+        : null;
+      const gateBase = {
         sceneDescription: sceneDescription.slice(0, 400),
         panelDescription: (panel.description || '').slice(0, 400),
         characterSummaries,
         referenceImages: refImagesForReview,
         worldview: worldviewStr,
+        expectedGender,
+        alignmentItems,
+      };
+      let gate: PanelGateResult = await runPanelGate({
+        ...gateBase,
+        imageDataUrl: img.image,
+        focusDimensions,
+        previousReview,
       });
-      if (review) {
-        reviewResult = {
-          overall: review.overall,
-          dimensions: review.dimensions,
-          topIssue: review.topIssue,
-          verdict: review.verdict,
-          confidence: review.confidence,
-        };
-      }
-      // 2026-09-11 图文对齐门禁：出图后逐项核对 description 里的可核验要素。
-      // 缺失 → 触发重画（与 review/limb/gender 并列的第 4 道闸）。
-      if (alignmentItems && alignmentItems.length > 0) {
-        const va = await verifyAlignment(candidate, alignmentItems);
-        if (va) {
-          alignmentResult = va;
-          if (!va.ok) {
-            console.warn(`[generatePanelImages] 图文对齐不达标：${va.reason}`);
+
+      // 肢体异常 → 局部 inpaint 修补（保住已付费的好图，不整张重抽）。
+      // 修补改变了图，所以四闸必须在新图上重跑 —— 否则审计记的是修补前的判断。
+      // 这是唯一会回到 2 次调用的路径，且只发生在「肢体真的画坏了」时。
+      let candidate = img.image;
+      let limbRepairNote: string | null = null;
+      const limbRegions = needsLimbRepair(gate);
+      if (limbRegions) {
+        console.warn(`[generatePanelImages] 肢体异常（置信度 ${limbRegions.confidence}）：${limbRegions.reason} → 局部 inpaint`);
+        try {
+          const repaired = await repairLimbRegions(img.image, limbRegions, inpaintBasePrompt);
+          candidate = repaired.image;
+          if (repaired.repaired) {
+            gate = await runPanelGate({ ...gateBase, imageDataUrl: candidate });
+          } else {
+            // 修补没救回来 → 最终图仍是原图，判分以原图那次为准，
+            // 但把"修补失败"这条诊断信息并进原因里，否则审计上看不出已经尝试过局部修复。
+            limbRepairNote = repaired.audit.abnormal ? repaired.audit.reason : 'inpaint 修补失败，已退回原图';
           }
+        } catch (e: any) {
+          console.warn(`[generatePanelImages] limb-guard 局部修复异常，使用原图：${e?.message || e}`);
         }
       }
-      // 判定本轮是否通过
-      const limbOk = !limbGuardResult || !limbGuardResult.abnormal;
-      const genderOk = !genderResult || !genderResult.mismatch;
-      // review 的判定：null（未启用/失败）→ 视作通过；否则看 overall
-      const reviewOk = reviewResult == null || reviewResult.overall >= REGENERATE_THRESHOLD;
-      // alignment 的判定：items 空 / 核验失败 → 视作通过；否则必须 ok
-      const alignmentOk = alignmentItems == null || alignmentItems.length === 0
-        || alignmentResult == null
-        || alignmentResult.ok;
-      if (limbOk && genderOk && reviewOk && alignmentOk) {
+
+      // ── 把合一闸的四块结果翻译成旧审计结构 ──
+      // 字段名与旧版逐字一致，UI / computeDriftScore 不用改。
+      //
+      // 走纯函数 gateToAuditFields 而不是就地赋值：这四个变量声明在循环**外**
+      // （审计落盘在循环后引用），写成 `if (gate.gender) genderAudit = ...` 会让
+      // 第 1 轮的结论漏进第 2 轮的审计。纯函数让"每轮全覆盖"由返回类型保证。
+      // 唯一允许跨轮保留的是 previousReview：它本来就该带着上一轮的分去继承未复核的维度。
+      const auditFields = gateToAuditFields(gate, alignmentItems, limbRepairNote);
+      limbGuardResult = auditFields.limbGuard;
+      genderResult = auditFields.genderAudit;
+      reviewResult = auditFields.review;
+      alignmentResult = gate.alignment;
+      if (gate.review) previousReview = gate.review;
+
+      const verdict = judgePanel(gate, { alignmentItems });
+      if (verdict.ok) {
         finalImage = candidate;
         finalAttempt = attempt;
         if (attempt > 1) regenReason = `第 ${attempt} 次达标`;
         break;
       }
       // 本轮不达标：记录原因，准备重试
-      const reasons: string[] = [];
-      if (!limbOk) reasons.push(`limb: ${limbGuardResult?.reason || 'abnormal'}`);
-      if (!genderOk) reasons.push(`gender: ${genderResult?.reason || 'mismatch'}`);
-      const reviewIssueText = (!reviewOk && reviewResult)
-        ? (reviewResult.topIssue || summarizeFailure({ ...reviewResult, dimensions: reviewResult.dimensions as any, verdict: reviewResult.verdict } as any))
-        : '';
-      if (reviewIssueText && reviewResult) reasons.push(`review(${reviewResult.overall}): ${reviewIssueText}`);
-      // 对齐缺失信息量最高：缺的道具/人数/动作直接告诉模型，重画才有的放矢。
-      if (!alignmentOk && alignmentResult && alignmentResult.missing.length > 0) {
-        reasons.push(`alignment: ${alignmentResult.reason}`);
-      }
-      regenReason = reasons.join('；');
+      regenReason = verdict.reasons.join('；');
       console.warn(`[generatePanelImages] 第 ${attempt} 次不达标：${regenReason}`);
       // 2026-09-10：把本轮不达标原因转成下一轮的修正指令 —— 重试不再是重掷骰子。
       // 仅当后面还有尝试时才生成（最后一轮之后 correctionText 已无意义）。
       if (attempt < MAX_TOTAL_ATTEMPTS) {
+        const missingItems = alignmentResult && !alignmentResult.ok ? alignmentResult.missing : [];
         correctionText = buildPanelCorrectionText({
-          reviewIssue: reviewIssueText || undefined,
-          limbReason: !limbOk ? (limbGuardResult?.reason || '肢体结构异常') : undefined,
-          genderReason: !genderOk ? (genderResult?.reason || '性别与设定不符') : undefined,
-          alignmentReason: (!alignmentOk && alignmentResult && alignmentResult.missing.length > 0)
-            ? `上一版漏画了这些要素，本版必须全部画出：${alignmentResult.missing.join('；')}`
+          reviewIssue: gate.review && gate.review.overall < REGENERATE_THRESHOLD
+            ? (gate.review.topIssue || `${DIMENSION_LABELS_ZH.D1_character_consistency} 等维度未达标`)
+            : undefined,
+          limbReason: needsLimbRepair(gate) ? (gate.limb?.reason || '肢体结构异常') : undefined,
+          genderReason: gate.gender?.mismatch ? (gate.gender.reason || '性别与设定不符') : undefined,
+          alignmentReason: missingItems.length > 0
+            ? `上一版漏画了这些要素，本版必须全部画出：${missingItems.join('；')}`
             : undefined,
         });
       }

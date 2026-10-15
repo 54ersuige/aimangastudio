@@ -118,3 +118,27 @@
 ## [2026-09-01] create | Wiki 初始化
 - SCHEMA.md / index.md / log.md 建立，域：AI_comic 重构知识库
 
+
+## [2026-10-15] behavior-change | 审计日志改写到 server/data/audit/
+- panel-audit 落盘位置 server/logs/ → server/data/audit/panel-audit
+- 根因：logs/ 是「每次启动清理」的临时目录，实测审计记录已全部消失 —— 导致「四道闸到底有没有用、重画有没有真的提分」只能靠感觉回答
+- server/data/ 已在 .gitignore 内，既是用户内容目录又不会随启动清理
+- 详见 [[four-gate-fusion]]
+
+## [2026-10-15] create | 孤儿图回收（server/orphan-gc.ts）
+- 根因：deleteStoredImage 在生图路径上从未被调用；446 张图里 443 张（663.3 MB / 99.3%）无任何引用
+- 判定只认 series-data.json（唯一事实源），不用 mtime —— mtime 会误删用户正在看但元数据未写回的图
+- 安全护栏：默认 dry-run、只删 uuid.ext、MAX_DELETE_PER_RUN=500
+- 入口：npm run gc:orphans [-- --apply]
+- 真实数据 dry-run 已跑：443 张 / 663.3 MB（未执行 --apply）
+- 详见 [[orphan-image-gc]]
+
+## [2026-10-15] behavior-change | 四道闸合一（server/panel-gate.ts）
+- limb / gender / comic-reviewer / alignment 四次 vision 调用 → runPanelGate 一次；典型 4 次（最坏 6 次）降到 1 次
+- 边界：肢体 inpaint 局部修复保留并独立抽出（repairLimbRegions）—— 局部修补是唯一能保住已付费好图的手段；guardedImage 保留给角色参考表/风格参考图两条路径
+- 判定阈值一字未改，集中到 judgePanel（limb 0.6 / review<70 / alignment 缺一即重画 / gender ambiguous 视作通过）
+- 瘦身：内部重试 3→0；按图片+输入指纹缓存 24h；第 2 轮起定向复审，未复核维度继承 previousReview 真实分数（不落到 parser 的 5 分默认值，否则污染审计）
+- 缓存键刻意含参考图 hash：D1/D6 是拿参考图比对出来的
+- 验证：tsc exit 0；vitest +19（panel-gate.test.ts 19 项）；运行时探针用真实 Agnes provider 触发 400 → 捕获 → 四闸全 null → fail-open 出图不阻塞
+- 自查中发现并修掉一处真 bug：limbGuardResult / genderResult / reviewResult 声明在重试循环外却只条件赋值 → 第 1 轮结论会漏进第 2 轮审计（表现为「审计说这张图性别不符，但它其实没问题」）。修法不是加 else，而是把翻译逻辑抽成纯函数 gateToAuditFields，让"每轮全覆盖"由返回类型保证；补 6 项回归测试锁住（含「第二轮只回一半 → 前半段必须清空」）
+- 详见 [[four-gate-fusion]]
