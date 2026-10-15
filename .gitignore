@@ -41,14 +41,26 @@ server/data/
 tools/style-bakeoff/
 tools/style-candidates/
 
+# 调试探针产物（server/ 与 tools/ 下的临时截图）
+**/_probe*.png
+**/probe-*.png
+tools/_probe.png
+
+# UI 截图（历史遗留，曾散落在根目录与 docs/screenshots/）。
+# 没有任何文档引用它们，且随界面改版早已过时 —— 属于过程产物不是资产。
+*.jpg
+docs/screenshots/
+
 # 导出的漫画成稿 PDF（2026-10-15：曾入库 2 个 / 23.3MB）。
 # 这些是"把某一话导出成 PDF"跑出来的**产物**，由 PublisherModal / 导出流程重新生成即可，
 # 不属于源码或资产，不应进代码仓库 —— 单个文件就 13.7MB，会让 clone 体积翻几倍。
 *.pdf
 
-# ⚠️ 例外：docs/references/*.png 是**画风基准稿**（用户确认过的参考图），
+# ⚠️ 以上 *.pdf / *.jpg / tools/style-bakeoff/ 之类的规则只管"过程产物"。
+# docs/references/*.png 是**画风基准稿**（用户确认过的参考图），
 # server/image-store.ts 的 loadStyleReferenceImages() 每次生图都要读它们注入画风锚点，
-# 它是资产不是产物，所以不加进忽略规则（PNG 也不在上面的忽略范围内）。
+# 它是资产不是产物，所以刻意不加进忽略规则。
+# 判据：删掉之后应用能不能正常画图 / 文档里有没有引用。
 
 # Editor directories and files
 .vscode/*
