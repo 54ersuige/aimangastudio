@@ -1,7 +1,7 @@
 # Wiki Index
 
 > AI_comic 重构知识库。每页一行摘要。查任何模块前先读这里。
-> Last updated: 2026-10-15 | Total pages: 10
+> Last updated: 2026-10-15 | Total pages: 12
 
 ## Entities
 <!-- 模块页：拆分/重构过的模块 -->
@@ -19,6 +19,8 @@
 - [[panel-generation-concurrency]] — 出图并发 3 + 失败隔离 + 进度上线：为何串行是「没进度」的根因、保序与全灭才抛两条硬约束
 - [[four-gate-fusion]] — 四道审核闸合并为 1 次 vision 调用：检测合并/修复不动、缓存键为何必须含参考图 hash、定向复审如何不污染审计
 - [[orphan-image-gc]] — 443 张图（663MB）无人引用的根因：只认 series-data.json 为事实源、dry-run + 单次上限 500 的不可逆操作护栏
+- [[live-run-retro-2026-10-15]] — 合一闸上线后首次实跑抓出两个静默 bug：代码默认值 90s 被运行时配置 30s 盖住导致超时、对齐闸 schema 与模型实际输出不符 15 次全废；fail-open 如何把故障伪装成通过
+- [[review-thresholds-relaxed]] — 审核标准下调的决策依据：6 格里 4 格烧满 3 次重试但原图其实合格；review 70→78、对齐缺一→60% 呈现率、肢体 0.6→0.7、重试 3→2
 
 ## Verification
 <!-- 验证记录 -->

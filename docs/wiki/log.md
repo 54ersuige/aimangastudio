@@ -142,3 +142,39 @@
 - 验证：tsc exit 0；vitest +19（panel-gate.test.ts 19 项）；运行时探针用真实 Agnes provider 触发 400 → 捕获 → 四闸全 null → fail-open 出图不阻塞
 - 自查中发现并修掉一处真 bug：limbGuardResult / genderResult / reviewResult 声明在重试循环外却只条件赋值 → 第 1 轮结论会漏进第 2 轮审计（表现为「审计说这张图性别不符，但它其实没问题」）。修法不是加 else，而是把翻译逻辑抽成纯函数 gateToAuditFields，让"每轮全覆盖"由返回类型保证；补 6 项回归测试锁住（含「第二轮只回一半 → 前半段必须清空」）
 - 详见 [[four-gate-fusion]]
+## [2026-10-15] fix | 实跑抓出两个静默失效的审核 bug
+四闸合一上线后跑第一次真实出图（6 格 / 并发 3），暴露两个单测发现不了的 bug：
+
+- **合一闸 30s 超时**：server/config.ts 里 vision.timeout 默认 90000，
+  但 server/runtime-config.json 存的是 30000，被旧配置盖住。
+  合并前 4 个轻调用各自能塞进 30s；合并后一次要吃 5 图 + 4 块输出 + 20000 tokens，必然超时。
+  6 格里 2 格四块全 null。→ 改运行时配置回 90000（只是恢复代码默认值）
+- **对齐闸一直是死的**：schema 要 {"items":[{"text":...}]}，模型稳定返回 {"items":["..."]}，
+  每次抽取都 zod 失败走 null。日志累计 alignment-extract-schema-fail 15 次。
+  → schema 改 z.union 同时接受两种形状，prompt 改成模型自然会给的简单形式
+- 补 server/alignment-items-schema.test.ts（4 项）锁住"两种形状都吃下"
+- 验证：typecheck exit 0；vitest 91 passed（原 87）
+- 详见 [[live-run-retro-2026-10-15]]
+
+## [2026-10-15] chore | 过程产物全量出库（git 历史同步清理）
+- 发现"从工作区删除 + 加 gitignore"**不动 git 历史**，blob 照样会被推上去：
+  清完 PDF 后 .git 仍有 93.5MB
+- 一并 purge：tools/style-bakeoff/(80.1MB 风格对比图) · .npm-cache/(1.3MB) ·
+  根目录 og.webp(1.1MB 旧副本) · *.jpg(1.3MB 4 张 2025-09 旧 UI 截图，无任何文档引用) ·
+  tools/_probe.png
+- .git 从 93.5MB → 11.2MB
+- 刻意保留（资产非产物）：docs/references/*.png(4.16MB 生图要读) · public/og.webp(1.13MB README 用)
+- 判据写进 .gitignore 注释：删掉后应用还能不能正常画图 / 文档里还有没有引用
+- 已推送 https://github.com/54ersuige/aimangastudio（origin），原作者保留为 upstream 只读
+## [2026-10-15] behavior-change | 审核标准下调（用户拍板：轻量化，别停滞）
+依据是 6 格真实出跑的审计数据：5 格里 4 格烧满 3 次重试（126s~265s/格），
+而用户看原图的评价是「故事说得清、情绪也对」—— 这些重试基本白花。
+
+- review 重画线 70 → 78
+- 对齐判据：缺任意 1 项 → 呈现率 ≥ 60%（3 项画 2 项 = 67% 通过；全缺或过半才重画）
+- 肢体置信度 0.6 → 0.7（低置信度触发 inpaint 可能把没问题的区域改坏）
+- 重试上限 3 → 2（即使不达标也只多花一轮，保证不会卡在重试里出不来）
+- 三层都放宽但底线还在：对齐仍要求至少 1 项画出、肢体仍要求有 bbox、review 仍是硬门槛
+- 补 7 项测试（isAlignmentAcceptable 判据 + 阈值断言同步）
+- 验证：typecheck exit 0；vitest 98 passed（原 91）
+- 详见 [[review-thresholds-relaxed]]
