@@ -49,7 +49,7 @@ export function SeriesWorkbench() {
     updateChapterInCurrent, moveChapterInCurrent, deleteChapterInCurrent,
     updatePageInCurrent, replacePanelsInCurrent, insertPanelInCurrent, deletePanelInCurrent,
     refreshCurrent,
-    busy, error, clearError,
+    busy, taskProgress, error, clearError,
   } = ctx;
 
   const [loglineTitle, setLoglineTitle] = useState('');
@@ -446,6 +446,7 @@ export function SeriesWorkbench() {
             onPrev={() => { if (currentEpisodeIndex > 0) pickEpisode(allChapters[currentEpisodeIndex - 1].id); }}
             onNext={() => { if (currentEpisodeIndex < allChapters.length - 1) pickEpisode(allChapters[currentEpisodeIndex + 1].id); }}
             busy={busy}
+            taskProgress={taskProgress}
             onBreakdownBatch={async (pageId) => { await breakdownPageInCurrent(pageId); }}
             onGenerateBatch={async (pageId) => { await generatePageInCurrent(pageId); }}
             onRegenerateBatch={async (pageId) => { await regeneratePageInCurrent(pageId); }}

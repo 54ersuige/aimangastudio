@@ -98,6 +98,12 @@ interface SeriesContextValue {
   generatePanelInCurrent: (pageId: string, panelIndex: number) => Promise<SeriesPage | null>;
   // 状态
   busy: boolean;
+  /**
+   * 进行中出图任务的进度 0-100；无任务进行中时为 null。
+   * 2026-10-15 新增 —— 此前后端虽然上报 progress，但前端从未消费，
+   * 用户面对几分钟的出图只能看到一个没有数字的"生成中"。
+   */
+  taskProgress: number | null;
   error: string | null;
   clearError: () => void;
   // 手动编辑（不依赖 AI 对话）
@@ -154,7 +160,17 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
   const [selectedEpisodeId, setSelectedEpisodeId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [taskProgress, setTaskProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  /**
+   * 传给 postTask 的进度回调（2026-10-15）。
+   * `report` 为 false 时用于不涉及出图的任务（角色/章节生成等），此时不污染进度条。
+   */
+  const progressOpts = useCallback(
+    (report: boolean) => (report ? { onProgress: (p: number) => setTaskProgress(p) } : undefined),
+    [],
+  );
 
   const refreshList = useCallback(async () => {
     setLoadingList(true);
@@ -441,6 +457,7 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
       return null;
     } finally {
       setBusy(false);
+      setTaskProgress(null);
     }
   }, [currentSeries, refreshCurrent]);
 
@@ -448,7 +465,7 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
     if (!currentSeries) return null;
     setBusy(true); setError(null);
     try {
-      const res = await generatePage(currentSeries.id, pageId);
+      const res = await generatePage(currentSeries.id, pageId, progressOpts(true));
       await refreshCurrent();
       // 后端在生成失败时会把 page.status = 'error' 并写 errorMessage；这里读出来给用户看。
       const updated = res.page;
@@ -461,6 +478,7 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
       return null;
     } finally {
       setBusy(false);
+      setTaskProgress(null);
     }
   }, [currentSeries, refreshCurrent]);
 
@@ -468,7 +486,7 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
     if (!currentSeries) return null;
     setBusy(true); setError(null);
     try {
-      const res = await regeneratePage(currentSeries.id, pageId);
+      const res = await regeneratePage(currentSeries.id, pageId, progressOpts(true));
       await refreshCurrent();
       const updated = res.page;
       if (updated?.status === 'error' && updated.errorMessage) {
@@ -480,6 +498,7 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
       return null;
     } finally {
       setBusy(false);
+      setTaskProgress(null);
     }
   }, [currentSeries, refreshCurrent]);
 
@@ -487,7 +506,7 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
     if (!currentSeries) return null;
     setBusy(true); setError(null);
     try {
-      const res = await rewritePage(currentSeries.id, pageId, instruction);
+      const res = await rewritePage(currentSeries.id, pageId, instruction, progressOpts(true));
       await refreshCurrent();
       return res.page;
     } catch (e: any) {
@@ -495,6 +514,7 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
       return null;
     } finally {
       setBusy(false);
+      setTaskProgress(null);
     }
   }, [currentSeries, refreshCurrent]);
 
@@ -531,7 +551,7 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
     if (!currentSeries) return null;
     setBusy(true); setError(null);
     try {
-      const res = await generatePanel(currentSeries.id, pageId, panelIndex);
+      const res = await generatePanel(currentSeries.id, pageId, panelIndex, progressOpts(true));
       await refreshCurrent();
       const updated = res.page;
       if (updated?.status === 'error' && updated.errorMessage) {
@@ -543,6 +563,7 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
       return null;
     } finally {
       setBusy(false);
+      setTaskProgress(null);
     }
   }, [currentSeries, refreshCurrent]);
 
@@ -729,12 +750,13 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
     updatePanelDialogueInCurrent,
     updatePanelTextInCurrent,
     rewritePanelTextInCurrent,
-    busy, error, clearError,
+    busy, error, clearError, taskProgress,
   }), [
     seriesList, loadingList, refreshList,
     currentSeries, setCurrentSeriesId, create, patch, remove, refreshCurrent,
     step, genWorldview, genCharacters, addChar, updateChar, deleteChar, regenCharImg, regenCharShot, genChapters,
-    selectedPageId, breakdown, gen, regen, rewritePg, rewritePn, continueNext, busy, error, clearError,
+    selectedPageId, breakdown, gen, regen, rewritePg, rewritePn, continueNext, busy, error, clearError, taskProgress,
+    progressOpts,
     selectedEpisodeId,
     breakdownById, generateById, regenerateById, rewritePageById, rewritePanelById, continuePageById, generatePanelById,
     updateChapterInCurrent, moveChapterInCurrent, deleteChapterInCurrent,

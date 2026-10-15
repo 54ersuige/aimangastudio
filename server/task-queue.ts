@@ -52,10 +52,13 @@ function isKeyBusy(key: string): boolean {
  * @param key   互斥键（如 `page:<pageId>` 或 `panel:<pageId>#<idx>`）。
  *              同 key 任务运行中时抛 DuplicateTaskError。
  * @param kind  任务类型标识（用于日志与前端提示）
- * @param fn    实际执行函数；resolve 值会作为 task.result 返回给轮询方
+ * @param fn    实际执行函数；resolve 值会作为 task.result 返回给轮询方。
+ *              **2026-10-15**：形参新增 taskId —— 执行体可据此调用
+ *              `setTaskProgress(taskId, n)` 上报进度。旧调用方忽略该形参即可，
+ *              无需改动（TS 允许少接形参）。
  * @returns taskId
  */
-export function runTask<T>(key: string, kind: string, fn: () => Promise<T>): string {
+export function runTask<T>(key: string, kind: string, fn: (taskId: string) => Promise<T>): string {
   // cleanup 仅惰性触发，不影响 runTask 主路径；
   // Node 单线程下 runTask 入口到 isKeyBusy 检查 + tasks.set 全部连续语句，
   // 不会被打断 → 同 key 的两个请求不可能都通过 isKeyBusy。
@@ -68,7 +71,7 @@ export function runTask<T>(key: string, kind: string, fn: () => Promise<T>): str
   tasks.set(id, task);
   void (async () => {
     try {
-      const result = await fn();
+      const result = await fn(id);
       const cur = tasks.get(id);
       if (cur) {
         cur.status = 'done';

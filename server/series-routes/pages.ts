@@ -3,12 +3,12 @@ import { z } from 'zod';
 import { getConfig } from '../config.js';
 import { sendError, logGeneration, sendFriendlyError } from '../utils.js';
 import { withDnaImagePrompt } from '../dna-inject.js';
-import { runTask, DuplicateTaskError } from '../task-queue.js';
+import { runTask, setTaskProgress, DuplicateTaskError } from '../task-queue.js';
 import { deleteStoredImage, isStoredImagePath, saveDataUrlImage } from '../image-store.js';
 import { getSeries, updatePage, replacePanels, insertPanel, deletePanel } from '../series-store.js';
 import type { Chapter, SeriesPage } from '../series-store.js';
 import { callStructuredJson, seriesDnaKey, findPage, sanitizePanels, iterAllChapters, PanelBreakdownZ, PanelRewriteZ, getImageProvider } from './helpers.js';
-import { collectPanelCharacterRefs, generatePanelImages, buildPanelImagePrompt, buildRecentContext, getStyleRefs } from './prompts.js';
+import { collectPanelCharacterRefs, generatePanelImages, describePanelFailures, buildPanelImagePrompt, buildRecentContext, getStyleRefs } from './prompts.js';
 
 const router = Router();
 
@@ -410,14 +410,25 @@ router.post('/series/:id/pages/:pageId/generate', async (req, res) => {
   if (missingPanels.length === 0) return sendError(res, 400, '本批分镜图已齐全；如需整批重画请用「重画此批」');
   let taskId: string;
   try {
-    taskId = runTask(`page:${targetPage.id}`, 'page-generate', async () => {
+    taskId = runTask(`page:${targetPage.id}`, 'page-generate', async (tid) => {
       try {
-        const paths = await generatePanelImages(series, targetPage.sceneDescription, missingPanels, `generate 第${targetPage.pageNumber}页`, dnaKey);
-        const pathByIndex = new Map(missingPanels.map((p, i) => [p.index, paths[i]] as const));
-        const updatedPanels = sortedAll.map(p => p.imageUrl ? p : { ...p, imageUrl: pathByIndex.get(p.index)! });
+        const { paths, failures } = await generatePanelImages(
+          series, targetPage.sceneDescription, missingPanels,
+          `generate 第${targetPage.pageNumber}页`, dnaKey,
+          { onProgress: (d, t) => setTaskProgress(tid, Math.round((d / t) * 100)) },
+        );
+        // 只回写成功的格：失败格保持原样（无图），绝不把 null 当成 imageUrl 写进去。
+        const pathByIndex = new Map<number, string>();
+        missingPanels.forEach((p, i) => { const v = paths[i]; if (v) pathByIndex.set(p.index, v); });
+        const updatedPanels = sortedAll.map(p =>
+          p.imageUrl || !pathByIndex.has(p.index) ? p : { ...p, imageUrl: pathByIndex.get(p.index)! },
+        );
         const updated = updatePage(series.id, targetChapter.id, targetPage.id, {
           panels: updatedPanels,
-          status: 'done',
+          // 部分失败也算这一批没跑完：红条列出哪几格失败 + 明说成功的已保留，
+          // 用户可只补那几格，而不是重画整批再付一遍钱。
+          status: failures.length > 0 ? 'error' : 'done',
+          errorMessage: failures.length > 0 ? describePanelFailures(failures, missingPanels.length) : undefined,
         });
         return { page: updated };
       } catch (e: any) {
@@ -449,16 +460,23 @@ router.post('/series/:id/pages/:pageId/regenerate', async (req, res) => {
 
   let taskId: string;
   try {
-    taskId = runTask(`page:${targetPage.id}`, 'page-regenerate', async () => {
+    taskId = runTask(`page:${targetPage.id}`, 'page-regenerate', async (tid) => {
       try {
-        const paths = await generatePanelImages(series, targetPage.sceneDescription, targetPage.panels, `regenerate 第${targetPage.pageNumber}页`, dnaKey);
-        const updatedPanels = [...targetPage.panels]
-          .sort((a, b) => a.index - b.index)
-          .map((p, i) => ({ ...p, imageUrl: paths[i] }));
+        const { paths, failures } = await generatePanelImages(
+          series, targetPage.sceneDescription, targetPage.panels,
+          `regenerate 第${targetPage.pageNumber}页`, dnaKey,
+          { onProgress: (d, t) => setTaskProgress(tid, Math.round((d / t) * 100)) },
+        );
+        const sortedPanels = [...targetPage.panels].sort((a, b) => a.index - b.index);
+        // 重画路径：失败格保留它原来的旧图，不清空 —— 宁可留旧图也不要留空洞。
+        const updatedPanels = sortedPanels.map((p, i) => {
+          const next = paths[i];
+          return next ? { ...p, imageUrl: next } : p;
+        });
         const updated = updatePage(series.id, targetChapter.id, targetPage.id, {
           panels: updatedPanels,
-          status: 'done',
-          errorMessage: undefined,
+          status: failures.length > 0 ? 'error' : 'done',
+          errorMessage: failures.length > 0 ? describePanelFailures(failures, sortedPanels.length) : undefined,
         });
         return { page: updated };
       } catch (e: any) {
@@ -498,10 +516,22 @@ router.post('/series/:id/pages/:pageId/panels/:panelIndex/generate', async (req,
   try {
     taskId = runTask(`panel:${targetPage.id}#${panelIndex}`, 'panel-generate', async () => {
       try {
-        const paths = await generatePanelImages(series, targetPage.sceneDescription, [targetPanel], `panel 第${targetPage.pageNumber}页#${panelIndex}`, dnaKey);
+        const { paths, failures } = await generatePanelImages(
+          series, targetPage.sceneDescription, [targetPanel],
+          `panel 第${targetPage.pageNumber}页#${panelIndex}`, dnaKey,
+        );
+        const single = paths[0];
+        if (!single) {
+          // 单格唯一一格失败 → 不写回，保持面板可重试，错误信息透出
+          const reason = failures[0]?.reason || '出图失败';
+          updatePage(series.id, targetChapter.id, targetPage.id, {
+            status: 'error', errorMessage: `第${panelIndex + 1}格出图失败：${reason}`,
+          });
+          throw new Error(`第${panelIndex + 1}格出图失败：${reason}`);
+        }
         const updatedPanels = [...targetPage.panels]
           .sort((a, b) => a.index - b.index)
-          .map(p => p.index === panelIndex ? { ...p, imageUrl: paths[0] } : p);
+          .map(p => p.index === panelIndex ? { ...p, imageUrl: single } : p);
         const allDone = updatedPanels.every(p => !!p.imageUrl);
         const updated = updatePage(series.id, targetChapter.id, targetPage.id, {
           panels: updatedPanels,
@@ -580,7 +610,7 @@ router.post('/series/:id/pages/:pageId/rewrite', async (req, res) => {
 
   let taskId: string;
   try {
-    taskId = runTask(`page:${targetPage.id}`, 'page-rewrite', async () => {
+    taskId = runTask(`page:${targetPage.id}`, 'page-rewrite', async (tid) => {
       try {
         // 1) 文字模型按用户指令重写分镜
         const rewritePrompt = `用户在修改第 ${targetPage.pageNumber} 页（章节：${targetChapter.title}）。\n\n用户原始内容：\n页标题：${targetPage.title}\n场景：${targetPage.sceneDescription}\n当前分镜：\n${targetPage.panels.map(p => `${p.index}. [${p.camera || 'mid'}] ${p.description}${p.dialogue ? `（对白："${p.dialogue}"）` : ''} → 角色：${p.characterIds.join(',') || '无'}${p.extraCharacters?.length ? `；配角：${p.extraCharacters.map(e => e.name).join(',')}` : ''}`).join('\n')}\n\n用户的新指令：${parsed.data.instruction}\n\n请输出改写后的页面（保留原分镜数量或合理调整）。${STORYBOARD_RULES}\ncharacterIds 必须从下列 ID 中选：${series.characters.map(c => `${c.id}=${c.name}`).join('，')}。`;
@@ -611,13 +641,21 @@ router.post('/series/:id/pages/:pageId/rewrite', async (req, res) => {
         const fresh = getSeries(series.id);
         const freshFound = fresh ? findPage(fresh, targetPage.id) : null;
         if (!freshFound) throw new Error('页面数据丢失');
-        const paths = await generatePanelImages(series, rewritten.sceneDescription, panels, `rewrite 第${targetPage.pageNumber}页`, dnaKey);
-        const updatedPanels = [...panels]
-          .sort((a, b) => a.index - b.index)
-          .map((p, i) => ({ ...p, imageUrl: paths[i] }));
+        const { paths, failures } = await generatePanelImages(
+          series, rewritten.sceneDescription, panels,
+          `rewrite 第${targetPage.pageNumber}页`, dnaKey,
+          { onProgress: (d, t) => setTaskProgress(tid, Math.round((d / t) * 100)) },
+        );
+        const sortedPanels = [...panels].sort((a, b) => a.index - b.index);
+        // 改写路径：分镜文本已换成新的，失败格无旧图可留，只能留空等重试。
+        const updatedPanels = sortedPanels.map((p, i) => {
+          const next = paths[i];
+          return next ? { ...p, imageUrl: next } : { ...p, imageUrl: undefined };
+        });
         const updated = updatePage(series.id, targetChapter.id, targetPage.id, {
           panels: updatedPanels,
-          status: 'done',
+          status: failures.length > 0 ? 'error' : 'done',
+          errorMessage: failures.length > 0 ? describePanelFailures(failures, sortedPanels.length) : undefined,
         });
         return { page: updated };
       } catch (e: any) {

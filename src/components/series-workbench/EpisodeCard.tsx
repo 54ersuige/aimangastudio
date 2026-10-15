@@ -20,6 +20,12 @@ function EpisodeCard(props: {
   onPrev: () => void;
   onNext: () => void;
   busy: boolean;
+  /**
+   * 进行中出图任务的进度 0-100（2026-10-15 新增）。
+   * 后端按"已完成格数 / 总格数"上报。此前这里只有一个布尔 busy，
+   * 用户点下去后只能看着一个不动的"生成中…"，完全不知道跑到哪儿了。
+   */
+  taskProgress?: number | null;
   // —— 批次级（内部生成批次） ——
   onBreakdownBatch: (pageId: string) => Promise<void>;
   onGenerateBatch: (pageId: string) => Promise<void>;
@@ -41,11 +47,18 @@ function EpisodeCard(props: {
   onRewritePanelText: (pageId: string, panelIndex: number, instruction: string) => Promise<void>;
 }) {
   const {
-    series, chapter, episodeIndex, episodeCount, onPrev, onNext, busy,
+    series, chapter, episodeIndex, episodeCount, onPrev, onNext, busy, taskProgress,
     onBreakdownBatch, onGenerateBatch, onRegenerateBatch, onRewriteBatch, onEditBatch,
     onGenerateAllMissing, onContinue, onPreview,
     onGeneratePanel, onRewritePanel, onUpdatePanelText, onUpdatePanelTextV2, onRewritePanelText,
   } = props;
+
+  /**
+   * 忙碌时的按钮文案。有真实进度就报百分比，没有就退回旧的通用文案。
+   * 进度只在出图类任务上报（角色/章节生成不报），所以 null 时不能显示 0%。
+   */
+  const busyText = (fallback: string) =>
+    busy ? (taskProgress != null ? `${fallback} ${taskProgress}%` : fallback) : '';
 
   // —— 重拆确认（两步，防误触；4 秒未确认自动复位） ——
   const [confirmRebreakPage, setConfirmRebreakPage] = useState<string | null>(null);
@@ -149,7 +162,7 @@ function EpisodeCard(props: {
           </button>
         ) : missing > 0 ? (
           <button onClick={onGenerateAllMissing} disabled={busy} className="btn btn--primary" title="逐批增量补齐缺图，已有图的格不会重画">
-            {busy ? '生成中…' : `② 生成本话缺图（${missing} 格）▸`}
+            {busy ? busyText('生成中') : `② 生成本话缺图（${missing} 格）▸`}
           </button>
         ) : (
           <button onClick={onContinue} disabled={busy} className="btn btn--primary" title="本话已规划批次全部完成；剧情需要继续时，基于已生成格 + 前文剧情追加一批（+6 格）">
@@ -205,7 +218,7 @@ function EpisodeCard(props: {
               {(pgGenerating || pgFailed) && (
                 <span style={{ fontSize: '0.6875rem', color: pgFailed ? '#B0413E' : 'var(--ink-2)', display: 'inline-flex', alignItems: 'center', gap: '0.375rem' }}>
                   {pgGenerating && <Spinner small />}
-                  {pgGenerating ? '生成中' : '已中断'}
+                  {pgGenerating ? (taskProgress != null ? `生成中 ${taskProgress}%` : '生成中') : '已中断'}
                 </span>
               )}
               <span style={{ flex: 1 }} />

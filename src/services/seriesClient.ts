@@ -62,12 +62,21 @@ async function request<T>(input: string, init: RequestInit = {}): Promise<T> {
 
 const TASK_POLL_INTERVAL = 2000;
 /**
- * postTask 默认最大等待时间（10 分钟）。
- * 超过则认为任务"丢失"（服务重启 / 网络异常 / 后端 OOM），抛错让 UI 提示用户。
- * 单独出图实际耗时通常 30~120 秒（6 格按 6×30s 算），10 分钟是宽松上限。
- * 2026-09-18 新增。
+ * 单次轮询请求自身的超时（毫秒）。
+ * 2026-10-15：此前 `request()` 里的 fetch 没有 AbortController —— 一旦这次请求挂住，
+ * `await` 永不返回，外层的总超时检查（位于循环顶部）**永远执行不到**，
+ * UI 就会无限转圈。给单次请求加超时，挂了才能进入下一轮或触发总超时。
  */
-const TASK_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+const TASK_POLL_TIMEOUT_MS = 20_000;
+/**
+ * 整任务最大等待时间（毫秒），默认 30 分钟。
+ *
+ * 2026-10-15：从 10 分钟上调，并与后端并发改造后的最坏耗时对齐 ——
+ * 单图超时 240s × 最多 3 轮 × ceil(格数/并发3) 轮次，6 格最坏仍可到 ~24 分钟。
+ * 原来的 10 分钟会让「后端还在正常画、前端先报失败」，用户重试 = 重复扣费。
+ * 真正的兜底交给总超时 + 后端 progress，而不是一个比后端更短的猜测值。
+ */
+const TASK_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 
 interface TaskState {
   id: string;
@@ -80,11 +89,12 @@ interface TaskState {
 }
 
 export interface PostTaskOptions {
-  /** 超时（毫秒），默认 10 分钟。 */
+  /** 总超时（毫秒），默认 30 分钟。 */
   timeoutMs?: number;
   /**
-   * 进度回调（每 2 秒一次）。可用于上层做进度条 / toast。
-   * 仅在 status='running' 且 progress 字段存在时回调。
+   * 进度回调（每 2 秒一次）。
+   * 后端从 2026-10-15 起会真正上报 progress（出图按"完成格数/总格数"），
+   * 不再是恒 0。UI 应展示它，否则用户面对长任务仍然两眼一抹黑。
    */
   onProgress?: (progress: number, kind: string) => void;
 }
@@ -108,10 +118,21 @@ export async function postTask<T>(path: string, body?: unknown, opts: PostTaskOp
     await sleep(TASK_POLL_INTERVAL);
     let task: TaskState;
     try {
-      const res = await request<{ task: TaskState }>(`/api/tasks/${taskId}`);
+      const res = await request<{ task: TaskState }>(`/api/tasks/${taskId}`, {
+        // 单次请求也带超时：否则请求挂住会让上面的总超时检查永远轮不到。
+        signal: AbortSignal.timeout(TASK_POLL_TIMEOUT_MS),
+      });
       task = res.task;
     } catch (e: any) {
-      throw new Error(e.message || '任务查询失败（服务可能已重启），请重新发起生成');
+      // 轮询失败本身不该终止整个任务：后端任务还在跑，
+      // 只有"查不到任务"（服务重启）才值得放弃。
+      if (/任务等待超时/.test(String(e?.message || ''))) throw e;
+      const msg = String(e?.message || '');
+      if (/not found|不存在|404/i.test(msg)) {
+        throw new Error('任务已不存在（服务可能已重启），请重新发起生成');
+      }
+      // 单次查询抖动：继续下一轮，总超时仍会兜底。
+      continue;
     }
     if (typeof task.progress === 'number' && opts.onProgress) {
       try { opts.onProgress(task.progress, task.kind); } catch { /* ignore */ }
@@ -266,22 +287,29 @@ export async function breakdownPage(seriesId: string, pageId: string): Promise<{
   return request(`/api/series/${seriesId}/pages/${pageId}/breakdown`, { method: 'POST', body: JSON.stringify({}) });
 }
 
-export async function generatePage(seriesId: string, pageId: string): Promise<{ page: SeriesPage }> {
-  return postTask(`/api/series/${seriesId}/pages/${pageId}/generate`, {});
+/**
+ * 以下 5 个出图类端点全部支持进度回传（2026-10-15）。
+ *
+ * 此前 `onProgress` 定义了却零传入 —— 后端上报的 progress 在 seriesClient:116
+ * 被直接丢弃，用户只能盯着一个没有数字的"生成中"。现在把 opts 一路透传到 postTask。
+ */
+
+export async function generatePage(seriesId: string, pageId: string, opts?: PostTaskOptions): Promise<{ page: SeriesPage }> {
+  return postTask(`/api/series/${seriesId}/pages/${pageId}/generate`, {}, opts);
 }
 
-export async function regeneratePage(seriesId: string, pageId: string): Promise<{ page: SeriesPage }> {
-  return postTask(`/api/series/${seriesId}/pages/${pageId}/regenerate`, {});
+export async function regeneratePage(seriesId: string, pageId: string, opts?: PostTaskOptions): Promise<{ page: SeriesPage }> {
+  return postTask(`/api/series/${seriesId}/pages/${pageId}/regenerate`, {}, opts);
 }
 
 // 单格（重）生成：只出这一格的图，不改文字。已有图时视为重掷。
-export async function generatePanel(seriesId: string, pageId: string, panelIndex: number): Promise<{ page: SeriesPage }> {
-  return postTask(`/api/series/${seriesId}/pages/${pageId}/panels/${panelIndex}/generate`, {});
+export async function generatePanel(seriesId: string, pageId: string, panelIndex: number, opts?: PostTaskOptions): Promise<{ page: SeriesPage }> {
+  return postTask(`/api/series/${seriesId}/pages/${pageId}/panels/${panelIndex}/generate`, {}, opts);
 }
 
 // 自然语言改写整页
-export async function rewritePage(seriesId: string, pageId: string, instruction: string): Promise<{ page: SeriesPage }> {
-  return postTask(`/api/series/${seriesId}/pages/${pageId}/rewrite`, { instruction });
+export async function rewritePage(seriesId: string, pageId: string, instruction: string, opts?: PostTaskOptions): Promise<{ page: SeriesPage }> {
+  return postTask(`/api/series/${seriesId}/pages/${pageId}/rewrite`, { instruction }, opts);
 }
 
 // 自然语言改写单分镜

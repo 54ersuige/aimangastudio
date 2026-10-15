@@ -3,6 +3,7 @@ import type { Series, SeriesCharacter, Chapter, Panel, SeriesPage } from '../ser
 import type { DnaKey } from '../../shared/types.js';
 import { withDnaImagePrompt } from '../dna-inject.js';
 import { logGeneration } from '../utils.js';
+import { mapConcurrent } from '../concurrency.js';
 import { saveDataUrlImage, resolveImageData, loadStyleReferenceImages } from '../image-store.js';
 import { getImageProvider, iterAllChapters, callStructuredJson } from './helpers.js';
 import { z } from 'zod';
@@ -902,13 +903,85 @@ export async function repairExtraCharacterGenders(
   return patched > 0;
 }
 
+/**
+ * 单格出图失败的信息（2026-10-15 新增）。
+ * 单格失败不再炸整页 —— 前面几格的钱已经花了、图已经落盘，
+ * 让它们变成没人引用的孤儿文件等于让用户重跑再付一遍。
+ */
+export interface PanelGenFailure {
+  /** panel 自身的下标（不是 sorted 数组下标）。 */
+  panelIndex: number;
+  reason: string;
+}
+
+/** 单批（整页 / 单格 / 重写）出图的结算结果。 */
+export interface PanelGenResult {
+  /**
+   * 与入参 `panels` **同序同长**；成功的格有 web 路径，失败的格为 `null`。
+   * 保序是硬要求 —— 调用方普遍用 `paths[i]` 对应 `panels[i]` 写回 imageUrl。
+   */
+  paths: Array<string | null>;
+  /** 失败格清单（供调用方拼错误文案 + 保留成功结果）。 */
+  failures: PanelGenFailure[];
+}
+
+export interface GeneratePanelImagesOptions {
+  /**
+   * 出图并发数（默认 3）。
+   * 每格最坏要跑 3 轮 × 5 次模型调用，串行时整页线性叠加；
+   * 3 路是「明显提速」与「不打爆上游限流」的折中。
+   * 设为 1 可退回串行（排查用）。
+   */
+  concurrency?: number;
+  /**
+   * 进度回调：每完成一格触发一次（含失败格）。
+   * 调用方通常接 `(d, t) => setTaskProgress(taskId, Math.round(d / t * 100))`。
+   */
+  onProgress?: (done: number, total: number) => void;
+}
+
+/**
+ * 出图的默认并发数。
+ * 集中一处，便于按上游实际限流表现调整。
+ */
+const DEFAULT_PANEL_CONCURRENCY = 3;
+
+/**
+ * 把失败格清单拼成一句用户能直接照做的文案。
+ *
+ * 关键是**说清楚"成功的图已经保住了"** —— 否则用户看到红色报错会以为整页白跑，
+ * 从而把已经付过钱的图重画一遍（这正是并发改造要避免的行为）。
+ */
+export function describePanelFailures(failures: PanelGenFailure[], total: number): string {
+  const idxs = failures.map(f => `第${f.panelIndex + 1}格`);
+  const shown = idxs.slice(0, 8).join('、');
+  const more = idxs.length > 8 ? ` 等 ${idxs.length} 格` : '';
+  const firstReason = failures[0]?.reason ? `（首个原因：${failures[0].reason}）` : '';
+  const ok = total - failures.length;
+  return ok > 0
+    ? `${ok}/${total} 格已生成并保留；失败 ${shown}${more}${firstReason}。可只重试失败的格，不必重画整批。`
+    : `${total} 格全部失败${firstReason}。`;
+}
+
+/**
+ * 批量为分镜出图。
+ *
+ * 2026-10-15 行为变更（并发 + 失败隔离）：
+ *  - 原来是 `for...of` **完全串行**，每格最坏 3 轮 × 5 次模型调用，
+ *    6 格整页最坏 ~96 次外部调用、最坏 72 分钟，而前端 10 分钟就超时 ——
+ *    用户看到失败，后端还在继续烧钱。
+ *  - 现在走有界并发（默认 3），且**单格失败不再中断整批**：
+ *    成功的格照常回写 imageUrl，失败的格进 `failures`。
+ *  - 全部格都失败才抛错（一无所获时才值得硬失败）。
+ */
 export async function generatePanelImages(
   series: Series,
   sceneDescription: string,
   panels: Panel[],
   logCtx: string,
   dnaKey: DnaKey,
-): Promise<string[]> {
+  options: GeneratePanelImagesOptions = {},
+): Promise<PanelGenResult> {
   // 世界观是分镜出图的硬前置 —— 画风 artStyle / paletteMood 由世界观提供。
   // 调用方（生成/重生成/续写整页）已确保 worldview 存在；这里再兜底一次以防路由层后续改动遗漏。
   if (!series.worldview) {
@@ -962,267 +1035,320 @@ export async function generatePanelImages(
   const imageProvider = getImageProvider(config);
   const style = series.worldview.artStyle;
   const mood = series.worldview.paletteMood;
-  const paths: string[] = [];
-  for (const panel of sorted) {
-    const { refImages, charDescLines, boundCharNames, anchorText } = collectPanelCharacterRefs(series, panel);
-    const styleRefs = getStyleRefs(dnaKey);
-    const prompt = buildPanelImagePrompt({
-      style,
-      mood,
-      sceneDescription,
-      description: panel.description,
-      charDescLines,
-      boundCharNames,
-      anchorText,
-      extraCharacters: panel.extraCharacters,
-    }) + styleRefs.note;
-    const allRefs = [...refImages, ...styleRefs.images];
-    // 2026-09-10：finalReq 改为 let，重试时按 attempt 重建（见下方重试循环）——
-    // 不再让三次尝试复用同一个不可变请求。此处先建首轮请求，用于长度预警。
-    let finalReq = withDnaImagePrompt({
-      prompt,
-      referenceImages: allRefs.length > 0 ? allRefs : undefined,
-      aspectRatio: '3:4',
-    }, { dnaKey, purpose: 'panel' });
-    // 上一轮不达标原因转成的修正指令；'' = 首轮无修正（见 buildPanelCorrectionText）
-    let correctionText = '';
-    // 2026-09-01 微调：>8000 时打印 head/tail 早预警（截断诊断在 dna-inject.ts 统一处理）
-    if (finalReq.prompt.length > 8000) {
-      console.warn(
-        `[series-routes] 分镜 ${logCtx} prompt ${finalReq.prompt.length} 接近上限\n` +
-        `  head(150): ${JSON.stringify(finalReq.prompt.slice(0, 150))}`,
-      );
+
+  // 2026-10-15：串行 for → 有界并发池。
+  // 每格的逻辑完全自包含（只读 series / config / provider，产物写各自的落盘路径），
+  // 唯一共享的是 appendPanelAudit —— 它用 appendFileSync，同步调用，
+  // 在 Node 单线程下天然原子，并发写 jsonl 不会串行交错。
+  const { values, failures } = await mapConcurrent(
+    sorted,
+    (panel) => generateOnePanelImage({
+      series, sceneDescription, panel, logCtx, dnaKey, config, imageProvider, style, mood,
+    }),
+    {
+      limit: options.concurrency ?? DEFAULT_PANEL_CONCURRENCY,
+      onSettled: options.onProgress,
+    },
+  );
+
+  const paths: Array<string | null> = values.map(v => v ?? null);
+  const panelFailures: PanelGenFailure[] = failures.map(f => ({
+    panelIndex: sorted[f.index]?.index ?? f.index,
+    reason: f.error instanceof Error ? f.error.message : String(f.error),
+  }));
+
+  // 全灭才算硬失败：一无所获时抛错，让页面红条明确提示。
+  // 部分失败绝不抛 —— 成功的图必须写回，否则用户白花钱。
+  if (panelFailures.length > 0 && panelFailures.length === sorted.length) {
+    throw new Error(
+      `本批 ${sorted.length} 格全部出图失败：${panelFailures.map(f => `第${f.panelIndex + 1}格 ${f.reason}`).join('；')}`,
+    );
+  }
+  if (panelFailures.length > 0) {
+    console.warn(
+      `[generatePanelImages] ${logCtx}：${sorted.length - panelFailures.length}/${sorted.length} 格成功，` +
+      `失败 ${panelFailures.map(f => `第${f.panelIndex + 1}格`).join('、')}（已保留成功图）`,
+    );
+  }
+  return { paths, failures: panelFailures };
+}
+
+/** 单格出图所需的外部依赖（每格共享，提前取好避免在并发体内反复构造）。 */
+interface GenerateOnePanelArgs {
+  series: Series;
+  sceneDescription: string;
+  panel: Panel;
+  logCtx: string;
+  dnaKey: DnaKey;
+  config: ReturnType<typeof getConfig>['image'];
+  imageProvider: ReturnType<typeof getImageProvider>;
+  style: string;
+  mood: string;
+}
+
+/**
+ * 单格出图（含 limb-guard / gender-audit / 8 维评审 / 图文对齐四道闸门与重试闭环）。
+ * 返回落盘后的 web 路径；彻底失败才抛。
+ */
+async function generateOnePanelImage(args: GenerateOnePanelArgs): Promise<string> {
+  const { series, sceneDescription, panel, logCtx, dnaKey, config, imageProvider, style, mood } = args;
+  const { refImages, charDescLines, boundCharNames, anchorText } = collectPanelCharacterRefs(series, panel);
+  const styleRefs = getStyleRefs(dnaKey);
+  const prompt = buildPanelImagePrompt({
+    style,
+    mood,
+    sceneDescription,
+    description: panel.description,
+    charDescLines,
+    boundCharNames,
+    anchorText,
+    extraCharacters: panel.extraCharacters,
+  }) + styleRefs.note;
+  const allRefs = [...refImages, ...styleRefs.images];
+  // 2026-09-10：finalReq 改为 let，重试时按 attempt 重建（见下方重试循环）——
+  // 不再让三次尝试复用同一个不可变请求。此处先建首轮请求，用于长度预警。
+  let finalReq = withDnaImagePrompt({
+    prompt,
+    referenceImages: allRefs.length > 0 ? allRefs : undefined,
+    aspectRatio: '3:4',
+  }, { dnaKey, purpose: 'panel' });
+  // 上一轮不达标原因转成的修正指令；'' = 首轮无修正（见 buildPanelCorrectionText）
+  let correctionText = '';
+  // 2026-09-01 微调：>8000 时打印 head/tail 早预警（截断诊断在 dna-inject.ts 统一处理）
+  if (finalReq.prompt.length > 8000) {
+    console.warn(
+      `[series-routes] 分镜 ${logCtx} prompt ${finalReq.prompt.length} 接近上限\n` +
+      `  head(150): ${JSON.stringify(finalReq.prompt.slice(0, 150))}`,
+    );
+  }
+
+  // 主角性别（用于 gender-audit 校验）。主角 = characterIds[0]，
+  // 若没设 characterIds 则跳过 gender 校验。
+  const protagonistId = panel.characterIds[0];
+  const protagonist = protagonistId ? series.characters.find(c => c.id === protagonistId) : null;
+  const expectedGender: 'female' | 'male' | 'ambiguous' | null =
+    protagonist?.gender === 'female' || protagonist?.gender === 'male' || protagonist?.gender === 'ambiguous'
+      ? protagonist.gender
+      : null;
+
+  // 2026-09-07 引擎层 P4：自动重生成闭环。
+  // 首张出图后跑 limb-guard + gender-audit；
+  // 任一不达标 → 重生成（最多 2 次），全部失败 → 用最后一次。
+  // 每次都写一条审计记录（含 attempt / 不达标原因）。
+  const MAX_TOTAL_ATTEMPTS = 3; // 1 次首试 + 最多 2 次重试
+  let finalImage: string | null = null;
+  let limbGuardResult: { abnormal: boolean; reason: string; confidence: number } | null = null;
+  let genderResult: { mismatch: boolean; expected: string; observed: string[]; reason: string; confidence: number } | null = null;
+  // 2026-09-07 漫画审核大师：8 维评审结果（提升到循环外 —— 审计落盘在循环后引用）
+  let reviewResult: PanelAuditRecord['review'] = null;
+  // 2026-09-11 图文对齐门禁：每格先抽一次"可核验要素清单"（文本调用，一次即可），
+  // 各 attempt 出图后逐项核对 —— 把"description 没画出来"变成可修正的重画信号。
+  let alignmentItems: string[] | null = null;
+  let alignmentResult: AlignmentAudit | null = null;
+  try {
+    const extracted = await extractAlignmentItems(panel.description, sceneDescription);
+    if (extracted && extracted.items.length > 0) alignmentItems = extracted.items;
+  } catch (e: any) {
+    console.warn(`[generatePanelImages] 对齐要素抽取失败（跳过本格门禁）：${e?.message || e}`);
+  }
+  let regenReason = 'ok';
+  let finalAttempt = 1; // 真实尝试次数（不能用 regenReason 正则解析 —— review(59) 里的 59 是评分不是次数）
+  const t0 = Date.now();
+
+  for (let attempt = 1; attempt <= MAX_TOTAL_ATTEMPTS; attempt++) {
+    // 2026-09-10：重试时把上一轮的具体问题注入 prompt —— 让重试成为"针对性修正"。
+    // 首轮 correctionText 为空，直接复用上面建好的 finalReq。
+    if (correctionText) {
+      finalReq = withDnaImagePrompt({
+        prompt: `${prompt}${correctionText}`,
+        referenceImages: allRefs.length > 0 ? allRefs : undefined,
+        aspectRatio: '3:4',
+      }, { dnaKey, purpose: 'panel' });
+      console.warn(`[generatePanelImages] 第 ${attempt} 次尝试已注入修正指令（prompt ${finalReq.prompt.length} 字符）`);
     }
-
-    // 主角性别（用于 gender-audit 校验）。主角 = characterIds[0]，
-    // 若没设 characterIds 则跳过 gender 校验。
-    const protagonistId = panel.characterIds[0];
-    const protagonist = protagonistId ? series.characters.find(c => c.id === protagonistId) : null;
-    const expectedGender: 'female' | 'male' | 'ambiguous' | null =
-      protagonist?.gender === 'female' || protagonist?.gender === 'male' || protagonist?.gender === 'ambiguous'
-        ? protagonist.gender
-        : null;
-
-    // 2026-09-07 引擎层 P4：自动重生成闭环。
-    // 首张出图后跑 limb-guard + gender-audit；
-    // 任一不达标 → 重生成（最多 2 次），全部失败 → 用最后一次。
-    // 每次都写一条审计记录（含 attempt / 不达标原因）。
-    const MAX_TOTAL_ATTEMPTS = 3; // 1 次首试 + 最多 2 次重试
-    let finalImage: string | null = null;
-    let limbGuardResult: { abnormal: boolean; reason: string; confidence: number } | null = null;
-    let genderResult: { mismatch: boolean; expected: string; observed: string[]; reason: string; confidence: number } | null = null;
-    // 2026-09-07 漫画审核大师：8 维评审结果（提升到循环外 —— 审计落盘在循环后引用）
-    let reviewResult: PanelAuditRecord['review'] = null;
-    // 2026-09-11 图文对齐门禁：每格先抽一次"可核验要素清单"（文本调用，一次即可），
-    // 各 attempt 出图后逐项核对 —— 把"description 没画出来"变成可修正的重画信号。
-    let alignmentItems: string[] | null = null;
-    let alignmentResult: AlignmentAudit | null = null;
     try {
-      const extracted = await extractAlignmentItems(panel.description, sceneDescription);
-      if (extracted && extracted.items.length > 0) alignmentItems = extracted.items;
-    } catch (e: any) {
-      console.warn(`[generatePanelImages] 对齐要素抽取失败（跳过本格门禁）：${e?.message || e}`);
-    }
-    let regenReason = 'ok';
-    let finalAttempt = 1; // 真实尝试次数（不能用 regenReason 正则解析 —— review(59) 里的 59 是评分不是次数）
-    const t0 = Date.now();
-
-    for (let attempt = 1; attempt <= MAX_TOTAL_ATTEMPTS; attempt++) {
-      // 2026-09-10：重试时把上一轮的具体问题注入 prompt —— 让重试成为"针对性修正"。
-      // 首轮 correctionText 为空，直接复用上面建好的 finalReq。
-      if (correctionText) {
-        finalReq = withDnaImagePrompt({
-          prompt: `${prompt}${correctionText}`,
-          referenceImages: allRefs.length > 0 ? allRefs : undefined,
-          aspectRatio: '3:4',
-        }, { dnaKey, purpose: 'panel' });
-        console.warn(`[generatePanelImages] 第 ${attempt} 次尝试已注入修正指令（prompt ${finalReq.prompt.length} 字符）`);
-      }
+      const img = await imageProvider.generateImage(config, finalReq);
+      // limb-guard（多胳膊 / 多手指）走局部 inpaint 修复
+      let candidate = img.image;
+      let localLimbAudit: { abnormal: boolean; reason: string; confidence: number } | null = null;
       try {
-        const img = await imageProvider.generateImage(config, finalReq);
-        // limb-guard（多胳膊 / 多手指）走局部 inpaint 修复
-        let candidate = img.image;
-        let localLimbAudit: { abnormal: boolean; reason: string; confidence: number } | null = null;
-        try {
-          const inpaintPrompt = buildPanelImagePrompt({
-            style,
-            mood,
-            sceneDescription,
-            description: panel.description,
-            charDescLines,
-            boundCharNames,
-            anchorText,
-            extraCharacters: panel.extraCharacters,
-          });
-          const guardResult = await guardedImage(img.image, inpaintPrompt, dnaKey);
-          candidate = guardResult.image;
-          localLimbAudit = guardResult.audit;
-        } catch (e: any) {
-          console.warn(`[generatePanelImages] limb-guard 流程异常，使用原图：${e?.message || e}`);
-        }
-        // 更新本次尝试的 limb-guard 结果（用于审计 + 是否重试）
-        limbGuardResult = localLimbAudit;
-        // gender-audit（仅在有 expectedGender 时跑）—— 不做 inpaint，仅判断
-        if (expectedGender) {
-          const ga = await checkGenderConsistency(candidate, expectedGender);
-          if (ga) {
-            genderResult = {
-              mismatch: ga.mismatch,
-              expected: ga.expectedGender,
-              observed: ga.observedGenders,
-              reason: ga.reason,
-              confidence: ga.confidence,
-            };
-          }
-        }
-        // 2026-09-07 漫画审核大师 P5：8 维评审（核心 —— 真审）
-        // 调用 vision provider 当主编，按 8 维评分；
-        // 总分 < REGENERATE_THRESHOLD(70) → 算不达标，需要重画。
-        // reviewResult 声明在循环外（审计落盘在循环后引用）。
-        const characterSummaries = (panel.characterIds || [])
-          .slice(0, 6)
-          .map(cid => {
-            const c = series.characters.find(x => x.id === cid);
-            if (!c) return '';
-            // 简短的角色摘要：名字 + 性别 + 装束
-            return `${c.name}（${c.gender}，${c.ageBand}）：${(c.outfit || '').slice(0, 30)}`;
-          })
-          .filter(Boolean);
-        const refImagesForReview = (panel.characterIds || [])
-          .slice(0, 4)
-          .map(cid => {
-            const c = series.characters.find(x => x.id === cid);
-            if (!c) return null;
-            // 2026-09-08 修复：referenceImages/referenceImage 存的是 web 路径（/data/images/xx.png），
-            // 必须经 resolveImageData 转成 dataURL —— 直接塞路径会让网关尝试加载相对 URL 而报 500。
-            const raw = c.referenceImages?.[0] ?? c.referenceImage ?? null;
-            return raw ? resolveImageData(raw) : null;
-          })
-          .filter((s): s is string => !!s);
-        const worldviewStr = `${style} · ${mood}`;
-        const review = await reviewPanel(candidate, {
-          sceneDescription: sceneDescription.slice(0, 400),
-          panelDescription: (panel.description || '').slice(0, 400),
-          characterSummaries,
-          referenceImages: refImagesForReview,
-          worldview: worldviewStr,
+        const inpaintPrompt = buildPanelImagePrompt({
+          style,
+          mood,
+          sceneDescription,
+          description: panel.description,
+          charDescLines,
+          boundCharNames,
+          anchorText,
+          extraCharacters: panel.extraCharacters,
         });
-        if (review) {
-          reviewResult = {
-            overall: review.overall,
-            dimensions: review.dimensions,
-            topIssue: review.topIssue,
-            verdict: review.verdict,
-            confidence: review.confidence,
+        const guardResult = await guardedImage(img.image, inpaintPrompt, dnaKey);
+        candidate = guardResult.image;
+        localLimbAudit = guardResult.audit;
+      } catch (e: any) {
+        console.warn(`[generatePanelImages] limb-guard 流程异常，使用原图：${e?.message || e}`);
+      }
+      // 更新本次尝试的 limb-guard 结果（用于审计 + 是否重试）
+      limbGuardResult = localLimbAudit;
+      // gender-audit（仅在有 expectedGender 时跑）—— 不做 inpaint，仅判断
+      if (expectedGender) {
+        const ga = await checkGenderConsistency(candidate, expectedGender);
+        if (ga) {
+          genderResult = {
+            mismatch: ga.mismatch,
+            expected: ga.expectedGender,
+            observed: ga.observedGenders,
+            reason: ga.reason,
+            confidence: ga.confidence,
           };
         }
-        // 2026-09-11 图文对齐门禁：出图后逐项核对 description 里的可核验要素。
-        // 缺失 → 触发重画（与 review/limb/gender 并列的第 4 道闸）。
-        if (alignmentItems && alignmentItems.length > 0) {
-          const va = await verifyAlignment(candidate, alignmentItems);
-          if (va) {
-            alignmentResult = va;
-            if (!va.ok) {
-              console.warn(`[generatePanelImages] 图文对齐不达标：${va.reason}`);
-            }
+      }
+      // 2026-09-07 漫画审核大师 P5：8 维评审（核心 —— 真审）
+      // 调用 vision provider 当主编，按 8 维评分；
+      // 总分 < REGENERATE_THRESHOLD(70) → 算不达标，需要重画。
+      // reviewResult 声明在循环外（审计落盘在循环后引用）。
+      const characterSummaries = (panel.characterIds || [])
+        .slice(0, 6)
+        .map(cid => {
+          const c = series.characters.find(x => x.id === cid);
+          if (!c) return '';
+          // 简短的角色摘要：名字 + 性别 + 装束
+          return `${c.name}（${c.gender}，${c.ageBand}）：${(c.outfit || '').slice(0, 30)}`;
+        })
+        .filter(Boolean);
+      const refImagesForReview = (panel.characterIds || [])
+        .slice(0, 4)
+        .map(cid => {
+          const c = series.characters.find(x => x.id === cid);
+          if (!c) return null;
+          // 2026-09-08 修复：referenceImages/referenceImage 存的是 web 路径（/data/images/xx.png），
+          // 必须经 resolveImageData 转成 dataURL —— 直接塞路径会让网关尝试加载相对 URL 而报 500。
+          const raw = c.referenceImages?.[0] ?? c.referenceImage ?? null;
+          return raw ? resolveImageData(raw) : null;
+        })
+        .filter((s): s is string => !!s);
+      const worldviewStr = `${style} · ${mood}`;
+      const review = await reviewPanel(candidate, {
+        sceneDescription: sceneDescription.slice(0, 400),
+        panelDescription: (panel.description || '').slice(0, 400),
+        characterSummaries,
+        referenceImages: refImagesForReview,
+        worldview: worldviewStr,
+      });
+      if (review) {
+        reviewResult = {
+          overall: review.overall,
+          dimensions: review.dimensions,
+          topIssue: review.topIssue,
+          verdict: review.verdict,
+          confidence: review.confidence,
+        };
+      }
+      // 2026-09-11 图文对齐门禁：出图后逐项核对 description 里的可核验要素。
+      // 缺失 → 触发重画（与 review/limb/gender 并列的第 4 道闸）。
+      if (alignmentItems && alignmentItems.length > 0) {
+        const va = await verifyAlignment(candidate, alignmentItems);
+        if (va) {
+          alignmentResult = va;
+          if (!va.ok) {
+            console.warn(`[generatePanelImages] 图文对齐不达标：${va.reason}`);
           }
         }
-        // 判定本轮是否通过
-        const limbOk = !limbGuardResult || !limbGuardResult.abnormal;
-        const genderOk = !genderResult || !genderResult.mismatch;
-        // review 的判定：null（未启用/失败）→ 视作通过；否则看 overall
-        const reviewOk = reviewResult == null || reviewResult.overall >= REGENERATE_THRESHOLD;
-        // alignment 的判定：items 空 / 核验失败 → 视作通过；否则必须 ok
-        const alignmentOk = alignmentItems == null || alignmentItems.length === 0
-          || alignmentResult == null
-          || alignmentResult.ok;
-        if (limbOk && genderOk && reviewOk && alignmentOk) {
-          finalImage = candidate;
-          finalAttempt = attempt;
-          if (attempt > 1) regenReason = `第 ${attempt} 次达标`;
-          break;
-        }
-        // 本轮不达标：记录原因，准备重试
-        const reasons: string[] = [];
-        if (!limbOk) reasons.push(`limb: ${limbGuardResult?.reason || 'abnormal'}`);
-        if (!genderOk) reasons.push(`gender: ${genderResult?.reason || 'mismatch'}`);
-        const reviewIssueText = (!reviewOk && reviewResult)
-          ? (reviewResult.topIssue || summarizeFailure({ ...reviewResult, dimensions: reviewResult.dimensions as any, verdict: reviewResult.verdict } as any))
-          : '';
-        if (reviewIssueText && reviewResult) reasons.push(`review(${reviewResult.overall}): ${reviewIssueText}`);
-        // 对齐缺失信息量最高：缺的道具/人数/动作直接告诉模型，重画才有的放矢。
-        if (!alignmentOk && alignmentResult && alignmentResult.missing.length > 0) {
-          reasons.push(`alignment: ${alignmentResult.reason}`);
-        }
-        regenReason = reasons.join('；');
-        console.warn(`[generatePanelImages] 第 ${attempt} 次不达标：${regenReason}`);
-        // 2026-09-10：把本轮不达标原因转成下一轮的修正指令 —— 重试不再是重掷骰子。
-        // 仅当后面还有尝试时才生成（最后一轮之后 correctionText 已无意义）。
-        if (attempt < MAX_TOTAL_ATTEMPTS) {
-          correctionText = buildPanelCorrectionText({
-            reviewIssue: reviewIssueText || undefined,
-            limbReason: !limbOk ? (limbGuardResult?.reason || '肢体结构异常') : undefined,
-            genderReason: !genderOk ? (genderResult?.reason || '性别与设定不符') : undefined,
-            alignmentReason: (!alignmentOk && alignmentResult && alignmentResult.missing.length > 0)
-              ? `上一版漏画了这些要素，本版必须全部画出：${alignmentResult.missing.join('；')}`
-              : undefined,
-          });
-        }
-        if (attempt === MAX_TOTAL_ATTEMPTS) {
-          // 用最后一次结果兜底，不阻塞流程
-          finalImage = candidate;
-          finalAttempt = attempt;
-        }
-      } catch (e: any) {
-        console.warn(`[generatePanelImages] 第 ${attempt} 次生成失败：${e?.message || e}`);
-        if (attempt === MAX_TOTAL_ATTEMPTS) {
-          // 用上次的结果或 null
-          finalImage = finalImage ?? null;
-          regenReason = `生成失败：${e?.message || e}`;
-        }
+      }
+      // 判定本轮是否通过
+      const limbOk = !limbGuardResult || !limbGuardResult.abnormal;
+      const genderOk = !genderResult || !genderResult.mismatch;
+      // review 的判定：null（未启用/失败）→ 视作通过；否则看 overall
+      const reviewOk = reviewResult == null || reviewResult.overall >= REGENERATE_THRESHOLD;
+      // alignment 的判定：items 空 / 核验失败 → 视作通过；否则必须 ok
+      const alignmentOk = alignmentItems == null || alignmentItems.length === 0
+        || alignmentResult == null
+        || alignmentResult.ok;
+      if (limbOk && genderOk && reviewOk && alignmentOk) {
+        finalImage = candidate;
+        finalAttempt = attempt;
+        if (attempt > 1) regenReason = `第 ${attempt} 次达标`;
+        break;
+      }
+      // 本轮不达标：记录原因，准备重试
+      const reasons: string[] = [];
+      if (!limbOk) reasons.push(`limb: ${limbGuardResult?.reason || 'abnormal'}`);
+      if (!genderOk) reasons.push(`gender: ${genderResult?.reason || 'mismatch'}`);
+      const reviewIssueText = (!reviewOk && reviewResult)
+        ? (reviewResult.topIssue || summarizeFailure({ ...reviewResult, dimensions: reviewResult.dimensions as any, verdict: reviewResult.verdict } as any))
+        : '';
+      if (reviewIssueText && reviewResult) reasons.push(`review(${reviewResult.overall}): ${reviewIssueText}`);
+      // 对齐缺失信息量最高：缺的道具/人数/动作直接告诉模型，重画才有的放矢。
+      if (!alignmentOk && alignmentResult && alignmentResult.missing.length > 0) {
+        reasons.push(`alignment: ${alignmentResult.reason}`);
+      }
+      regenReason = reasons.join('；');
+      console.warn(`[generatePanelImages] 第 ${attempt} 次不达标：${regenReason}`);
+      // 2026-09-10：把本轮不达标原因转成下一轮的修正指令 —— 重试不再是重掷骰子。
+      // 仅当后面还有尝试时才生成（最后一轮之后 correctionText 已无意义）。
+      if (attempt < MAX_TOTAL_ATTEMPTS) {
+        correctionText = buildPanelCorrectionText({
+          reviewIssue: reviewIssueText || undefined,
+          limbReason: !limbOk ? (limbGuardResult?.reason || '肢体结构异常') : undefined,
+          genderReason: !genderOk ? (genderResult?.reason || '性别与设定不符') : undefined,
+          alignmentReason: (!alignmentOk && alignmentResult && alignmentResult.missing.length > 0)
+            ? `上一版漏画了这些要素，本版必须全部画出：${alignmentResult.missing.join('；')}`
+            : undefined,
+        });
+      }
+      if (attempt === MAX_TOTAL_ATTEMPTS) {
+        // 用最后一次结果兜底，不阻塞流程
+        finalImage = candidate;
+        finalAttempt = attempt;
+      }
+    } catch (e: any) {
+      console.warn(`[generatePanelImages] 第 ${attempt} 次生成失败：${e?.message || e}`);
+      if (attempt === MAX_TOTAL_ATTEMPTS) {
+        // 用上次的结果或 null
+        finalImage = finalImage ?? null;
+        regenReason = `生成失败：${e?.message || e}`;
       }
     }
-
-    if (!finalImage) {
-      throw new Error(`分镜 ${panel.index} 三次尝试均失败`);
-    }
-
-    // 审计记录（2026-09-07 反馈层 P2）
-    const finalPath = saveDataUrlImage(finalImage);
-    const pageInfo = findPageContext(series, panel);
-    appendPanelAudit({
-      ts: new Date().toISOString(),
-      seriesId: series.id,
-      seriesTitle: series.title,
-      pageNumber: pageInfo.pageNumber,
-      panelIndex: panel.index,
-      chapterTitle: pageInfo.chapterTitle,
-      action: logCtx.includes('panel-rewrite') ? 'panel-rewrite' : logCtx.includes('regenerate') ? 'regenerate' : 'generate',
-      dnaKey,
-      promptLen: finalReq.prompt.length,
-      refCount: refImages.length,
-      styleRefCount: styleRefs.images.length,
-      limbGuard: limbGuardResult,
-      genderAudit: genderResult,
-      review: reviewResult,
-      alignmentAudit: alignmentResult
-        ? {
-          ok: alignmentResult.ok,
-          items: alignmentItems ?? [],
-          missing: alignmentResult.missing,
-          reason: alignmentResult.reason,
-          confidence: alignmentResult.confidence,
-        }
-        : null,
-      attempt: finalImage === null ? 0 : finalAttempt,
-      totalAttempts: MAX_TOTAL_ATTEMPTS,
-      regenReason,
-      finalImageHash: hashImageDataUrl(finalImage),
-      costMs: Date.now() - t0,
-    });
-    paths.push(finalPath);
   }
-  return paths;
+
+  if (!finalImage) {
+    throw new Error(`分镜 ${panel.index} 三次尝试均失败`);
+  }
+
+  // 审计记录（2026-09-07 反馈层 P2）
+  const finalPath = saveDataUrlImage(finalImage);
+  const pageInfo = findPageContext(series, panel);
+  appendPanelAudit({
+    ts: new Date().toISOString(),
+    seriesId: series.id,
+    seriesTitle: series.title,
+    pageNumber: pageInfo.pageNumber,
+    panelIndex: panel.index,
+    chapterTitle: pageInfo.chapterTitle,
+    action: logCtx.includes('panel-rewrite') ? 'panel-rewrite' : logCtx.includes('regenerate') ? 'regenerate' : 'generate',
+    dnaKey,
+    promptLen: finalReq.prompt.length,
+    refCount: refImages.length,
+    styleRefCount: styleRefs.images.length,
+    limbGuard: limbGuardResult,
+    genderAudit: genderResult,
+    review: reviewResult,
+    alignmentAudit: alignmentResult
+      ? {
+        ok: alignmentResult.ok,
+        items: alignmentItems ?? [],
+        missing: alignmentResult.missing,
+        reason: alignmentResult.reason,
+        confidence: alignmentResult.confidence,
+      }
+      : null,
+    attempt: finalImage === null ? 0 : finalAttempt,
+    totalAttempts: MAX_TOTAL_ATTEMPTS,
+    regenReason,
+    finalImageHash: hashImageDataUrl(finalImage),
+    costMs: Date.now() - t0,
+  });
+  return finalPath;
 }
 
 /** 辅助：根据 panel 找到它所属的 chapter / page 信息（用于审计日志）。 */

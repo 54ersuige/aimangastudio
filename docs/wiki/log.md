@@ -2,6 +2,19 @@
 
 > 重构动作日志，append-only。格式：`## [YYYY-MM-DD] action | subject`
 
+## [2026-10-15] behavior-change | 出图并发化 + 失败隔离 + 进度真正上线
+- 用户决策：并发数取 **3**（提速明显且不打爆上游限流）
+- **根因**：原来 `prompts.ts` 里 `for (const panel of sorted)` **完全串行**，每格最坏 3 轮 × 5 次模型调用；6 格整页最坏 ~96 次外部调用、**最坏 72 分钟**，而前端 10 分钟就超时 —— 用户看到失败、后端还在烧钱。这就是"跑图不知道进度"的真实来源：不是没做进度条，是后端根本没在并发跑，第 1 格没画完前 progress 必然是 0
+- 新增 `server/concurrency.ts` 的 `mapConcurrent`：有界并发，**保序回填 + 失败隔离**。worker 用"抢下标"而非分片（分片会拖尾），`onSettled` 覆盖成功与失败项，保证进度一定走完全程
+- `generatePanelImages` 返回值从 `string[]` 改为 `{ paths: (string|null)[]; failures: PanelGenFailure[] }`，**保序等长是硬要求**（调用方普遍按 `paths[i]` 对应 `panels[i]` 写回）
+- **单格失败不再炸整页**：原来 `prompts.ts` 末尾直接 `throw 分镜 N 三次尝试均失败`，前面几格已落盘的图 `imageUrl` 从未写回 → 已付费的图变孤儿文件。改为收集 failures 继续跑；**全灭才抛**。4 个调用点全部改写：generate / regenerate / panel-generate / page-rewrite
+- 失败文案 `describePanelFailures` 明确告诉用户"成功几格已保留、可只重试失败的格，不必重画整批" —— 否则用户看到红条会以为整页白跑，从而重复扣费
+- 进度接线（此前是**两头都断的空转**）：`runTask` 的执行体形参新增 `taskId`（旧调用方忽略即可，无需改动）→ `generatePanelImages` 的 `onProgress` → `setTaskProgress`；前端 `seriesClient` 的 4 个出图端点透传 `PostTaskOptions` → `SeriesContext` 新增 `taskProgress` → `EpisodeCard` 显示"生成中 N%"
+- 顺手修掉**假超时**：`postTask` 的轮询 fetch 此前无 `AbortController`，请求一挂住 `await` 永不返回，位于循环顶部的总超时检查**永远执行不到**，UI 无限转圈。现加 `AbortSignal.timeout(20s)`，且单次查询抖动不再终止整个任务（只有"任务不存在"才放弃）
+- 总超时 10 分钟 → **30 分钟**，与并发后最坏耗时对齐（原先比后端短，等于逼用户重试）
+- 验证：`npm run check` exit 0；`npx vitest run` **54 passed**（新增 21 个：并发原语 12 + 进度链路 4 + 失败文案 5）；`npm run build` exit 0
+- 详见 [[panel-generation-concurrency]]
+
 ## [2026-10-15] baseline | 地基工程：typecheck / strict / 测试
 - **typecheck 接线**：root 与 server 各加 `typecheck` script，root 加 `npm run check` 一次跑两端。此前 typecheck 没有任何入口，等于前端完全没有类型保护
 - **根因修复（最大单点收益）**：`@types/react` / `@types/react-dom` 从未安装，且 `tsconfig.json` 的 `"types": ["node"]` 把 React 类型整个切掉。开 strict 后前端一次性冒出 **2229 个错误**，其中 1890 个是 TS7026（JSX 无类型声明）—— 即"缺一个 devDependency"，不是 1890 个代码缺陷。装上 + 修正 types 后降到 **30 个**
