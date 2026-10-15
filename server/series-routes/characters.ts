@@ -341,24 +341,6 @@ router.post('/series/:id/characters', async (req, res) => {
   res.json({ character });
 });
 
-router.patch('/series/:id/characters/:characterId', (req, res) => {
-  const series = getSeries(req.params.id);
-  if (!series) return sendError(res, 404, 'Series not found');
-  const schema = z.object({
-    name: z.string().optional(),
-    role: z.enum(['protagonist', 'antagonist', 'supporting']).optional(),
-    description: z.string().optional(),
-    appearance: z.string().optional(),
-    voiceTone: z.string().optional(),
-    referenceImage: z.string().optional(),
-  });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return sendError(res, 400, parsed.error.message);
-  const updated = updateCharacter(series.id, req.params.characterId, parsed.data);
-  if (!updated) return sendError(res, 404, 'Character not found');
-  res.json({ character: updated });
-});
-
 router.delete('/series/:id/characters/:characterId', (req, res) => {
   const series = getSeries(req.params.id);
   if (!series) return sendError(res, 404, 'Series not found');
@@ -368,6 +350,14 @@ router.delete('/series/:id/characters/:characterId', (req, res) => {
 });
 
 // 手动编辑：保存角色元数据（名字/描述/特征/性格/视觉锚点/参考图）
+//
+// 2026-10-15：本路由此前存在 **两份** 同 method+path 的 PATCH handler ——
+// 上面还有一份只允许 name/role/description/appearance/voiceTone/referenceImage 的窄版。
+// Express 对同一 method+path 是「先注册的先响应且从不 next()」，因此窄版永远生效，
+// 而本版（完整 schema + validateCharacter 契约校验）整段是**不可达死代码**。
+// 叠加 Zod v3 的 `z.object()` 默认剥离未声明 key → 改角色的视觉锚点/性别/服装
+// 会返回 200 但字段被静默丢弃，正好破坏跨页角色一致性。
+// 窄版已删除。防复发见 server/series-routes/no-duplicate-routes.test.ts。
 const UpdateCharacterSchema = z.object({
   name: z.string().min(1).optional(),
   role: z.enum(['protagonist', 'antagonist', 'supporting']).optional(),
