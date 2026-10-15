@@ -330,6 +330,13 @@ export interface TaskState {
   error?: string;
   createdAt: string;
   updatedAt: string;
+  /**
+   * 进度 0-100，仅对 status='running' 的任务有意义。
+   * 任务执行者通过 task-queue 的 setTaskProgress(id, progress) 主动上报；
+   * 上报失败 / 未上报时 progress 可能为 0 或保持上一份值，前端 UI 应容忍。
+   * 2026-09-18 新增。
+   */
+  progress?: number;
 }
 
 // ========== 公众号图文草稿（第一阶段）==========

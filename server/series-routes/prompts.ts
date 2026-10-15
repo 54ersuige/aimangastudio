@@ -742,6 +742,100 @@ const GenderFixSchema = {
 
 const GENDER_HINTS_FOR_REPAIR = ['男', '女', '先生', '女士', '小伙', '姑娘', 'man', 'woman', 'male', 'female', '他', '她', 'boy', 'girl', 'lady', 'gentleman'];
 
+/**
+ * 自动补全分镜 description 到 ≥ 60 字。
+ *
+ * 2026-09-18：validatePanel 把 description < 60 改为 repairable 类，
+ * generatePanelImages 入口先调本函数把描述补齐再校验，避免 LLM 偶尔写
+ * 50-58 字导致整页生图被卡死。
+ *
+ * 设计原则：
+ *  - 不重写整段，只在末尾追加"细化场景细节"（位置/姿态/视线/关键道具），
+ *    避免改变原意。
+ *  - 一次调用补齐所有不合格 panel（≤ 6 个），单次输出 JSON 数组。
+ *  - 任何 LLM 错误 / 返回过短 → 返回 null，由调用方降级为 warning。
+ */
+const DescriptionRepairSchema = {
+  type: 'object',
+  properties: {
+    fixes: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          index: { type: 'integer', description: 'panel 在原数组中的 0-based 序号' },
+          extendedDescription: {
+            type: 'string',
+            description: '在原 description 基础上追加细节，使总长 ≥ 60 字。保留原文不删减，必要时改写不通顺处。',
+          },
+        },
+        required: ['index', 'extendedDescription'],
+      },
+    },
+  },
+  required: ['fixes'],
+} as Record<string, unknown>;
+
+const DescriptionRepairZ = z.object({
+  fixes: z.array(z.object({
+    index: z.number().int().nonnegative(),
+    extendedDescription: z.string().min(40),
+  })).min(1),
+});
+
+export async function repairShortDescriptions(
+  panels: Panel[],
+  sceneDescription: string,
+  dnaKey: DnaKey,
+): Promise<boolean> {
+  const items = panels
+    .map((p, idx) => ({ idx, p, len: (p.description || '').trim().length }))
+    .filter(it => it.len < 60 && it.len > 0); // 完全空的不修，避免给 LLM 编造整段画面
+  if (items.length === 0) return false;
+
+  const prompt = [
+    '为以下漫画分镜补全 description 到 ≥ 60 字（中文字符），不要删减原文，必要时改写不通顺处。',
+    '补全方向：①每个人的具体位置与相对距离 ②正在做的具体动作/手势 ③视线方向（看哪/看谁/看地面）④1-2 个关键道具及其状态。',
+    '',
+    `场景：${sceneDescription.slice(0, 300)}`,
+    '',
+    '分镜列表（index | 当前描述）：',
+    ...items.map(it => `- ${it.idx} | ${it.p.description || ''}`),
+    '',
+    '严格输出 JSON，extendedDescription 必须包含原文并在其基础上扩写到 ≥ 60 字。',
+  ].join('\n');
+
+  let result: z.infer<typeof DescriptionRepairZ>;
+  try {
+    result = await callStructuredJson<z.infer<typeof DescriptionRepairZ>>(
+      prompt,
+      '你是一位漫画分镜顾问。输出严格 JSON。',
+      DescriptionRepairSchema,
+      {
+        dnaKey,
+        temperature: 0.3,
+        logKind: 'repair-short-descriptions',
+        validate: raw => DescriptionRepairZ.parse(raw),
+      },
+    );
+  } catch (e: any) {
+    console.warn(`[repair-short-descriptions] LLM 调用失败：${e?.message || e}`);
+    return false;
+  }
+
+  let patched = 0;
+  for (const fix of result.fixes) {
+    const it = items.find(x => x.idx === fix.index);
+    if (!it) continue;
+    const extended = (fix.extendedDescription || '').trim();
+    if (extended.length < 60) continue;
+    it.p.description = extended;
+    patched++;
+  }
+  console.log(`[repair-short-descriptions] 自动补全 ${patched}/${items.length} 个分镜的 description`);
+  return patched > 0;
+}
+
 export async function repairExtraCharacterGenders(
   panels: Panel[],
   sceneDescription: string,
@@ -832,11 +926,20 @@ export async function generatePanelImages(
   const pageV = validatePage(tempPage, charMap);
   if (!pageV.ok) {
     if (pageV.repairable) {
-      // 2026-09-08：全部错误均为「一次性配角缺性别标签」类 → 自动修复而不是卡死用户。
-      // LLM 推断补全 → 重校验 → 若仍有残余，降级为 warning 继续（配角不影响连载一致性）。
+      // 2026-09-18：repairable 现在包含两类：
+      //   - 「一次性配角缺性别标签」 → repairExtraCharacterGenders
+      //   - 「description 太短」       → repairShortDescriptions
+      // 两类独立修复，串行跑（先短文补全、再性别标签），任意一步降级为 warning 继续。
+      let descRepaired = false;
+      try {
+        descRepaired = await repairShortDescriptions(sorted, sceneDescription, dnaKey);
+      } catch (e: any) {
+        console.warn(`[generatePanelImages] description 补全调用失败（降级继续）：${e?.message || e}`);
+      }
+
       try {
         const repaired = await repairExtraCharacterGenders(sorted, sceneDescription, dnaKey);
-        if (repaired) {
+        if (repaired || descRepaired) {
           const reV = validatePage(tempPage, charMap);
           if (reV.ok) {
             console.log('[generatePanelImages] 分镜校验问题已自动修复，继续生成');
@@ -850,7 +953,8 @@ export async function generatePanelImages(
         console.warn(`[generatePanelImages] 性别标签自动修复调用失败（降级继续）：${e?.message || e}`);
       }
     } else {
-      // 含 fatal 错误（角色必填字段缺失 / description 太短 / characterId 不存在）→ 必须人工处理
+      // 含 fatal 错误（角色必填字段缺失 / characterId 不存在）→ 必须人工处理
+      // 2026-09-18：description 太短 已不再属于 fatal；只有真正的角色数据不全才会抛错。
       throw new Error(`分镜校验失败：${pageV.errors.join('；')}`);
     }
   }

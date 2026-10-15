@@ -112,6 +112,13 @@ export async function generateImage(config: ModelConfig['image'], req: ImageRequ
   const hasRefs = !!(req.referenceImages && req.referenceImages.length > 0);
 
   // ── 图生图：multipart /v1/images/edits ─────────────────────────────────────
+  // 2026-09-17：Agnes /v1/images/edits 当前可能返回 503 "no available server"
+  // （上游 OpenAI 异常 / 后端服务挂 / 队列拥堵）。一旦发生，整次生图就废——
+  // 角色设定表永远出不来，用户卡在"暂无参考图"。
+  //
+  // 修复：探测性先打 edits 一次；若失败且属于"上游不可用"这一类，自动 fallback
+  // 到纯文生图（去掉 references）。画风一致性靠 DNA prompt 锚定，style refs
+  // 缺失是降级而非阻断。这样不论 Agnes 服务状态怎样都能交付图片。
   if (hasRefs) {
     const form = new FormData();
     form.append('model', config.model || 'agnes-image-2.5-flash');
@@ -141,11 +148,29 @@ export async function generateImage(config: ModelConfig['image'], req: ImageRequ
       body: form,
       timeout: config.timeout,
     });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Agnes image-edit API error ${res.status}: ${text}`);
+
+    if (res.ok) {
+      return await parseAgnesImageResponse(res);
     }
-    return await parseAgnesImageResponse(res);
+
+    // 非 2xx：判断是否属于「上游不可用」类错误。属于则 fallback 到纯文生图；
+    // 其它错误（如 prompt 校验失败 / 模型不存在）应当原样抛错，避免静默掩盖。
+    const errBody = await res.text();
+    const status = res.status;
+    const isUpstreamUnavailable =
+      status === 502 || status === 503 || status === 504 ||
+      /no available server|queue is full|upstream_error|ServiceUnavailableError|OpenAIException/i.test(errBody);
+
+    if (isUpstreamUnavailable) {
+      console.warn(
+        `[agnes] /v1/images/edits 返回 ${status}（上游不可用），自动 fallback 到纯文生图（丢弃 ${req.referenceImages!.length} 张参考图）。` +
+        ` 模型=${config.model}。原始错误：${errBody.slice(0, 200)}`,
+      );
+      // 递归调用自己，但去掉 referenceImages —— 走纯文生图分支。
+      return await generateImage(config, { ...req, referenceImages: undefined });
+    }
+
+    throw new Error(`Agnes image-edit API error ${status}: ${errBody}`);
   }
 
   // ── 纯文生图：JSON /v1/images/generations ──────────────────────────────────

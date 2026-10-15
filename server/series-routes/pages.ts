@@ -491,10 +491,12 @@ router.post('/series/:id/pages/:pageId/panels/:panelIndex/generate', async (req,
   if (!targetPanel) return sendError(res, 404, 'Panel not found');
   const dnaKey = seriesDnaKey(series);
 
-  // 不整页置 generating（避免其余格全部显示"生成中"）；同页并发由 runTask 任务键互斥兜底。
+  // 不整页置 generating（避免其余格全部显示"生成中"）；
+  // 单格互斥键 = `panel:${pageId}#${idx}`，与整页 generate 互不阻塞。
+  // 同 page 内 panel-generate 串行（同 panel 不能并发）。
   let taskId: string;
   try {
-    taskId = runTask(`page:${targetPage.id}`, 'panel-generate', async () => {
+    taskId = runTask(`panel:${targetPage.id}#${panelIndex}`, 'panel-generate', async () => {
       try {
         const paths = await generatePanelImages(series, targetPage.sceneDescription, [targetPanel], `panel 第${targetPage.pageNumber}页#${panelIndex}`, dnaKey);
         const updatedPanels = [...targetPage.panels]
@@ -678,7 +680,9 @@ router.post('/series/:id/pages/:pageId/panels/:panelIndex/rewrite', async (req, 
 
   let taskId: string;
   try {
-    taskId = runTask(`page:${targetPage.id}`, 'panel-rewrite', async () => {
+    // 2026-09-18：单格 rewrite 也用 `panel:${pageId}#${idx}` 锁，与 panel-generate
+    // 互斥（同 panel 不允许同时改写 + 重生），但与整页 / 其它 panel 不互斥。
+    taskId = runTask(`panel:${targetPage.id}#${panelIndex}`, 'panel-rewrite', async () => {
       try {
         // 1) 文字模型重写这一格的描述
         const rewritePrompt = `当前是漫画第 ${targetPage.pageNumber} 页（章节：${targetChapter.title}）中的第 ${panelIndex} 格。\n\n原描述：${targetPanel.description}\n原镜头：${targetPanel.camera || 'mid'}\n${targetPanel.dialogue ? `原对白："${targetPanel.dialogue}"` : ''}\n\n用户的新指令：${parsed.data.instruction}\n\n请改写这一格的画面描述、镜头（camera）、对白、出场角色（characterIds 仅从下列 ID 中选：${series.characters.map(c => `${c.id}=${c.name}`).join('，')}；画面里出现的一次性配角放 extraCharacters）。严格输出 JSON。`;

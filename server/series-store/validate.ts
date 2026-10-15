@@ -62,6 +62,11 @@ export function auditCharacter(c: SeriesCharacter): 'ok' | 'legacy' {
  *  - description ≥ 60 字（避免"一句话概览"导致生图信息密度太低）
  *  - 出场角色（characterIds + extraCharacters）必须都有"性别标签"
  *    文字描述（避免模型自动假设性别）
+ *
+ * 2026-09-18：`description 太短` 从 fatal 降为 repairable —— 调用方
+ * （generatePanelImages）应先尝试 LLM 自动补全 description 到 ≥ 60 字，
+ * 补全后再 validate；只有补全也失败时才抛错。这样 LLM 偶尔写 50-58 字
+ * 不会卡死整页生成。
  */
 export function validatePanel(p: Panel, characterMap: Map<string, SeriesCharacter>): ValidationResult {
   const errors: string[] = [];
@@ -69,7 +74,7 @@ export function validatePanel(p: Panel, characterMap: Map<string, SeriesCharacte
   const fatalErrors: string[] = [];
   const desc = (p.description || '').trim();
   if (desc.length < 60) {
-    fatalErrors.push(`description 太短 ${desc.length}/60 字（信息密度太低会让画面失焦）`);
+    repairableErrors.push(`description 太短 ${desc.length}/60 字（信息密度太低会让画面失焦）`);
   }
   // 校验出场角色都有结构化字段
   for (const cid of p.characterIds || []) {
