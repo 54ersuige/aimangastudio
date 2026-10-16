@@ -32,6 +32,18 @@ export interface AuditRecord {
     verdict: 'publish' | 'revise' | 'reject';
     confidence: number;
   } | null;
+  /**
+   * 图文对齐门禁结果。
+   * 注意：这个字段后端从 2026-09-11 起就在写，但前端类型一直漏着，
+   * 所以对齐这一道闸的结果从来没在 UI 上显示过（2026-10-16 补上）。
+   */
+  alignmentAudit?: {
+    ok: boolean;
+    items: string[];
+    missing: string[];
+    reason: string;
+    confidence: number;
+  } | null;
   attempt: number;
   totalAttempts: number;
   regenReason: string;
@@ -44,8 +56,10 @@ interface Props {
   seriesId?: string;
 }
 
-const DIMS: Array<{ key: string; label: string }> = [
-  { key: 'D1_character_consistency', label: '人物连续' },
+/** 列表默认展开条数；超出折叠为「显示更多」。 */
+const LIST_PAGE = 15;
+
+const DIMS: Array<{ key: string; label: string }> = [  { key: 'D1_character_consistency', label: '人物连续' },
   { key: 'D2_cinematography', label: '镜头语言' },
   { key: 'D3_composition', label: '构图分镜' },
   { key: 'D4_style_consistency', label: '风格一致' },
@@ -73,6 +87,7 @@ export function AuditCard({ seriesId }: Props) {
   const [score, setScore] = useState<number | null>(null);
   const [averages, setAverages] = useState<Record<string, number | null>>({});
   const [loading, setLoading] = useState(true);
+  const [showAll, setShowAll] = useState(false);
 
   const reload = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -237,52 +252,104 @@ export function AuditCard({ seriesId }: Props) {
             ))}
           </div>
 
-          {/* 最近评审记录 + 评语 */}
-          {flagged.length > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-              <div className="kicker kicker--accent">最近不达标记录（{flagged.length} 条 · 另有 {passed.length} 条达标、{unreviewed.length} 条未审到，未在此列出）</div>
-              {flagged.slice(0, 12).map((r, i) => (
-                <div key={`${r.ts}-${i}`} style={{ border: '1px solid var(--rule)', borderRadius: '6px', padding: '0.5rem 0.75rem', fontSize: '0.8rem' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '0.25rem' }}>
-                    <strong>
-                      {r.seriesTitle || r.seriesId.slice(0, 8)} · 第{r.pageNumber}页 · 第{r.panelIndex}格
-                      {r.review && <span style={{ color: scoreColor(r.review.overall), marginLeft: '0.5rem' }}>{r.review.overall}/100</span>}
+          {/* 审核记录（全量）：用户要能一眼看出「审完了没」和「每张结果是什么」 */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <div className="kicker kicker--accent">
+              审核记录（{records.length} 条 · 已审 {reviewed.length} · 未审到 {unreviewed.length}
+              {unreviewed.length > 0 ? ' —— 审核未跑完，下面标「未审到」的格子可重新审核' : ' —— 全部审完'})
+            </div>
+            {(showAll ? records : records.slice(0, LIST_PAGE)).map((r, i) => {
+              const isFlagged = flagged.includes(r);
+              const isUnreviewed = r.review == null;
+              const statusColor = isUnreviewed ? '#9ca3af' : isFlagged ? '#d97706' : '#16a34a';
+              const statusText = isUnreviewed ? '未审到' : isFlagged ? '不达标' : '达标';
+              return (
+                <div key={`${r.ts}-${i}`} style={{
+                  border: `1px solid ${isUnreviewed ? 'var(--rule-soft)' : 'var(--rule)'}`,
+                  borderLeft: `3px solid ${statusColor}`,
+                  borderRadius: '6px', padding: '0.5rem 0.75rem', fontSize: '0.8rem',
+                  opacity: isUnreviewed ? 0.75 : 1,
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '0.25rem', gap: '0.5rem' }}>
+                    <strong style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      <span style={{ color: statusColor, fontSize: '0.7rem', fontWeight: 700 }}>{statusText}</span>
+                      <span>
+                        {r.seriesTitle || r.seriesId.slice(0, 8)} · 第{r.pageNumber}页 · 第{r.panelIndex + 1}格
+                      </span>
+                      {r.review && <span style={{ color: scoreColor(r.review.overall) }}>{r.review.overall}/100</span>}
+                      {r.review && (
+                        <span className="kicker" style={{ fontSize: '0.65rem' }}>
+                          {r.review.verdict === 'publish' ? '可直接发布' : r.review.verdict === 'revise' ? '可发布但有改进点' : '建议重画'}
+                        </span>
+                      )}
                     </strong>
-                    <span className="kicker" style={{ fontSize: '0.65rem' }}>
+                    <span className="kicker" style={{ fontSize: '0.65rem', whiteSpace: 'nowrap' }}>
                       {new Date(r.ts).toLocaleString('zh-CN', { hour12: false })}
                     </span>
                   </div>
-                  {r.review && r.review.topIssue && (
-                    <div style={{ color: scoreColor(r.review.overall), marginBottom: '0.25rem', fontWeight: 500 }}>
-                      📝 {r.review.topIssue}
+
+                  {isUnreviewed ? (
+                    <div style={{ color: '#9ca3af', fontSize: '0.75rem' }}>
+                      审核调用失败或模型没收到图 —— 按「视作通过」处理，未计入分数。这一格不能算审过。
                     </div>
+                  ) : (
+                    <>
+                      {r.review?.topIssue && (
+                        <div style={{ color: scoreColor(r.review.overall), marginBottom: '0.25rem', fontWeight: 500 }}>
+                          📝 {r.review.topIssue}
+                        </div>
+                      )}
+                      {/* 只展开失分维度：达标的图没必要把 8 维全铺开 */}
+                      {r.review && (Object.entries(r.review.dimensions) as Array<[string, { score: number; reason: string }]>)
+                        .filter(([, v]) => v.score < 7)
+                        .slice(0, 3)
+                        .map(([k, v]) => {
+                          const label = DIMS.find(d => d.key === k)?.label ?? k;
+                          return (
+                            <div key={k} style={{ color: '#6b7280', fontSize: '0.75rem' }}>
+                              · {label} {v.score.toFixed(1)}/10 — {v.reason}
+                            </div>
+                          );
+                        })}
+                      {(r.limbGuard?.abnormal || r.genderAudit?.mismatch) && (
+                        <div style={{ color: '#d97706', fontSize: '0.75rem', marginTop: '0.2rem' }}>
+                          {r.limbGuard?.abnormal ? `🦴 肢体异常：${r.limbGuard.reason}` : ''}
+                          {r.genderAudit?.mismatch ? ` ⚧ 性别不符：${r.genderAudit.reason}` : ''}
+                        </div>
+                      )}
+                      {r.alignmentAudit && !r.alignmentAudit.ok && (
+                        <div style={{ color: '#d97706', fontSize: '0.75rem' }}>
+                          🎯 图文对齐：{r.alignmentAudit.reason}
+                        </div>
+                      )}
+                    </>
                   )}
-                  {r.review && (Object.entries(r.review.dimensions) as Array<[string, { score: number; reason: string }]>).filter(([, v]) => v.score < 7).slice(0, 3).map(([k, v]) => {
-                    const label = DIMS.find(d => d.key === k)?.label ?? k;
-                    return (
-                      <div key={k} style={{ color: '#6b7280', fontSize: '0.75rem' }}>
-                        · {label} {v.score.toFixed(1)}/10 — {v.reason}
-                      </div>
-                    );
-                  })}
+
                   {r.regenReason !== 'ok' && (
-                    <div style={{ color: '#d97706', marginTop: '0.25rem' }}>
+                    <div style={{ color: '#d97706', marginTop: '0.25rem', fontSize: '0.75rem' }}>
                       🔄 重生成: {r.regenReason}（第{r.attempt}/{r.totalAttempts}次达标）
                     </div>
                   )}
+                  <div className="kicker" style={{ fontSize: '0.62rem', marginTop: '0.2rem' }}>
+                    {Math.round((r.costMs || 0) / 1000)}s · {r.action} · prompt {r.promptLen} 字符
+                  </div>
                 </div>
-              ))}
-            </div>
-          )}
-
-          {/* 未审到：既不是通过也不是不通过，单独说明，不混进红条 */}
-          {unreviewed.length > 0 && (
-            <div style={{ marginTop: '1rem' }}>
-              <div className="kicker" style={{ fontSize: '0.7rem', color: '#9ca3af' }}>
-                未审到（{unreviewed.length} 条）—— 审核调用失败或模型没收到图，按"视作通过"处理，不计入分数
-              </div>
-            </div>
-          )}
+              );
+            })}
+            {records.length > LIST_PAGE && (
+              <button
+                type="button"
+                onClick={() => setShowAll(v => !v)}
+                style={{
+                  alignSelf: 'flex-start', padding: '0.3rem 0.8rem', fontSize: '0.75rem',
+                  border: '1px solid var(--rule)', borderRadius: '6px',
+                  background: 'var(--paper-2, #fafaf7)', cursor: 'pointer',
+                }}
+              >
+                {showAll ? '收起' : `显示更多（还有 ${records.length - LIST_PAGE} 条）`}
+              </button>
+            )}
+          </div>
         </>
       )}
       </div>
