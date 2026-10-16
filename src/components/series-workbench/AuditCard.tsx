@@ -118,6 +118,23 @@ export function AuditCard({ seriesId }: Props) {
 
   const reviewed = records.filter(r => r.review != null);
   const flagged = records.filter(r => r.regenReason !== 'ok' || r.limbGuard?.abnormal || r.genderAudit?.mismatch);
+  const passed = records.filter(r => !flagged.includes(r));
+  const unreviewed = records.filter(r => r.review == null);
+
+  /**
+   * 2026-10-16：这个列表只挑「不达标」，达标的一条都不显示，
+   * 于是用户看到空列表或几条红条时会以为"只有这几张审过"。
+   * 实际每张出图都进了 records（上面雷达图和 8 维均分就是从它们算的）。
+   * 补三个计数行，把"审了多少 / 过了多少 / 有问题多少 / 没审到多少"说清楚，
+   * 并且让「未审到」单独一栏 —— 它既不是通过也不是不通过，
+   * 混进红条里会让人以为是张 0 分的烂图（这正是 2026-10-16 实测里发生过的事）。
+   */
+  const counts = [
+    { label: '已审', value: reviewed.length, color: '#374151' },
+    { label: '达标', value: passed.length, color: '#16a34a' },
+    { label: '不达标', value: flagged.length, color: '#d97706' },
+    { label: '未审到', value: unreviewed.length, color: '#9ca3af' },
+  ];
 
   return (
     <section
@@ -207,10 +224,23 @@ export function AuditCard({ seriesId }: Props) {
             })}
           </div>
 
+          {/* 计数行：让"每张都审了，但只列不达标的"这件事可见 */}
+          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
+            {counts.map(c => (
+              <div key={c.label} style={{
+                border: '1px solid var(--rule-soft)', borderRadius: '6px',
+                padding: '0.35rem 0.7rem', display: 'flex', alignItems: 'baseline', gap: '0.4rem',
+              }}>
+                <span className="kicker" style={{ fontSize: '0.7rem' }}>{c.label}</span>
+                <strong style={{ color: c.color, fontSize: '1rem' }}>{c.value}</strong>
+              </div>
+            ))}
+          </div>
+
           {/* 最近评审记录 + 评语 */}
           {flagged.length > 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-              <div className="kicker kicker--accent">最近不达标记录</div>
+              <div className="kicker kicker--accent">最近不达标记录（{flagged.length} 条 · 另有 {passed.length} 条达标、{unreviewed.length} 条未审到，未在此列出）</div>
               {flagged.slice(0, 12).map((r, i) => (
                 <div key={`${r.ts}-${i}`} style={{ border: '1px solid var(--rule)', borderRadius: '6px', padding: '0.5rem 0.75rem', fontSize: '0.8rem' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '0.25rem' }}>
@@ -242,6 +272,15 @@ export function AuditCard({ seriesId }: Props) {
                   )}
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* 未审到：既不是通过也不是不通过，单独说明，不混进红条 */}
+          {unreviewed.length > 0 && (
+            <div style={{ marginTop: '1rem' }}>
+              <div className="kicker" style={{ fontSize: '0.7rem', color: '#9ca3af' }}>
+                未审到（{unreviewed.length} 条）—— 审核调用失败或模型没收到图，按"视作通过"处理，不计入分数
+              </div>
             </div>
           )}
         </>

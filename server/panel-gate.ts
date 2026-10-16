@@ -389,16 +389,38 @@ function parseReview(
     weightTotal += DIMENSION_WEIGHTS[k];
   }
 
-  const pick = (key: string): unknown => (p[key] !== undefined ? p[key] : dims[key]);
+  const pick = (k: string): unknown => (p[k] !== undefined ? p[k] : dims[k]);
+  const confidence = typeof pick('confidence') === 'number' ? clamp01(pick('confidence') as number) : (previous?.confidence ?? 0.5);
+
+  // ── 「没审到」必须与「审了但是 0 分」区分开 ──
+  // 2026-10-16 实测抓到：某一格模型**没收到图**，回了
+  //   dimensions 全 0 + reason「无图像输入，无法评分。」+ confidence 0
+  // 解析器把它当成一次有效评审，overall=0 < 阈值 → 触发重画。
+  // 代价有三：白白重画一次、把 0 分写进连载质量分与 8 维均分、
+  // 在审计面板上显示成刺眼的红色 0/100，让人以为是"最差的图"。
+  //
+  // 判据：overall 恰好为 0 **且** confidence 为 0。
+  // 真·糟糕的图模型照样会给分（低分但非 0），且 confidence 不会是 0；
+  // 只有"根本没审"才会同时出现 0 分和 0 置信度。
+  // 命中 → 返回 null，走 fail-open（视作通过），与其它解析失败路径一致。
+  const overall = Math.round((weightedSum / weightTotal) * 10);
+  if (overall === 0 && confidence === 0) {
+    logGeneration('panel-gate-not-reviewed', {
+      reason: '全部维度 0 分且 confidence=0 —— 判定为未审到（模型未收到图）',
+      topIssue: typeof pick('top_issue') === 'string' ? (pick('top_issue') as string).slice(0, 120) : '',
+    });
+    return null;
+  }
+
   const verdictRaw = pick('verdict');
   return {
     dimensions: scores as Record<DimensionKey, DimensionScore>,
-    overall: Math.round((weightedSum / weightTotal) * 10),
+    overall,
     topIssue: typeof pick('top_issue') === 'string' ? (pick('top_issue') as string).slice(0, 60) : (previous?.topIssue ?? ''),
     verdict: verdictRaw === 'publish' || verdictRaw === 'revise' || verdictRaw === 'reject'
       ? verdictRaw
       : (previous?.verdict ?? 'revise'),
-    confidence: typeof pick('confidence') === 'number' ? clamp01(pick('confidence') as number) : (previous?.confidence ?? 0.5),
+    confidence,
   };
 }
 
