@@ -20,7 +20,7 @@
  *  - docs/style-dna/cinematic-realism.md
  */
 
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, statSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import * as newYorkerNoir from './new-yorker-noir.js';
@@ -177,6 +177,7 @@ export function verifyAllDna(): DnaVerifyReport[] {
     }
     reports.push(r);
   }
+  verifyDnaMirrors();
   return reports;
 }
 
@@ -187,6 +188,42 @@ export const DNA_DOCS_PATHS: Record<DnaKey, string> = {
   'shonen-vintage': join(REPO_ROOT, 'docs', 'style-dna', 'shonen-vintage.md'),
   'cinematic-realism': join(REPO_ROOT, 'docs', 'style-dna', 'cinematic-realism.md'),
 };
+
+/** 单个 .md 镜像的检查结果。 */
+export interface DnaMirrorReport {
+  key: DnaKey;
+  path: string;
+  exists: boolean;
+  bytes: number;
+  ok: boolean;
+}
+
+/**
+ * 检查每个 DNA 的 .md 镜像是否存在且非空。
+ *
+ * 2026-10-16：DNA_DOCS_PATHS 此前导出后全项目无人调用 —— checksum.ts 的头注释
+ * 声称会校验 .md 镜像，实际没有任何代码做这件事。规则只写在注释里 = 没有规则。
+ * 这里把它接上：镜像缺失/空文件会在启动时报警，不阻断。
+ */
+export function verifyDnaMirrors(): DnaMirrorReport[] {
+  const reports: DnaMirrorReport[] = [];
+  for (const key of DNA_KEYS) {
+    const p = DNA_DOCS_PATHS[key];
+    const exists = existsSync(p);
+    const bytes = exists ? statSync(p).size : 0;
+    const ok = exists && bytes > 0;
+    if (!ok) {
+      console.error(
+        `[dna/registry] ⚠ .md 镜像缺失或为空: ${key} → ${p}` +
+        `（改了 dna/*.ts 记得同步 docs/style-dna/）`
+      );
+    } else {
+      console.log(`[dna/registry] ✓ ${key} .md 镜像 OK (${bytes} B)`);
+    }
+    reports.push({ key, path: p, exists, bytes, ok });
+  }
+  return reports;
+}
 
 /** CLI：手动重算并打印 checksum（带 --write 自动写回）。 */
 if (import.meta.url === `file:///${process.argv[1]?.replace(/\\/g, '/')}`) {

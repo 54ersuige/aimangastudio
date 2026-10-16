@@ -22,6 +22,7 @@ import {
   generateArcs,
   generateArcChapters,
   appendNextChapter,
+  replanChapter as replanChapterApi,
   generateChapters,
   breakdownPage,
   generatePage,
@@ -73,6 +74,8 @@ interface SeriesContextValue {
   generateArcsForCurrent: () => Promise<Arc[] | null>;
   generateArcChaptersForCurrent: (arcId: string, opts?: { targetPageCount?: number; hint?: string }) => Promise<Chapter[] | null>;
   appendNextChapterForCurrent: (arcId: string, opts?: { pageCount?: number; hint?: string }) => Promise<Chapter | null>;
+  /** 2026-10-16：重新规划某一话（推倒重写 summary，使其撑满容量且有张力）。 */
+  replanChapterForCurrent: (chapterId: string, opts?: { hint?: string; keepTitle?: boolean }) => Promise<{ chapter: Chapter; notes: string[]; stalePanels: number } | null>;
   // Step 3（旧结构兼容）
   generateChaptersForCurrent: (targetPageCount?: number) => Promise<Chapter[] | null>;
   // Step 4
@@ -443,6 +446,23 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
     }
   }, [currentSeries, refreshCurrent]);
 
+  // 2026-10-16 新增：重新规划某一话（推倒重写 summary）。
+  // 与 appendChapter 的区别：不新建，而是改写已存在的那一话。
+  const replanChapter = useCallback(async (chapterId: string, opts?: { hint?: string; keepTitle?: boolean }) => {
+    if (!currentSeries) return null;
+    setBusy(true); setError(null);
+    try {
+      const res = await replanChapterApi(currentSeries.id, chapterId, opts);
+      await refreshCurrent();
+      return res;
+    } catch (e: any) {
+      setError(e.message || '重新规划失败');
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }, [currentSeries, refreshCurrent]);
+
   // —— Step 4 核心实现：显式 pageId 版本（话级 UI 用，不依赖 selectedPageId） ——
 
   const breakdownById = useCallback(async (pageId: string) => {
@@ -730,6 +750,7 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
     generateArcsForCurrent: genArcs,
     generateArcChaptersForCurrent: genArcChapters,
     appendNextChapterForCurrent: appendChapter,
+    replanChapterForCurrent: replanChapter,
     selectedPageId, setSelectedPageId,
     selectedEpisodeId, setSelectedEpisodeId,
     breakdownSelectedPage: breakdown,

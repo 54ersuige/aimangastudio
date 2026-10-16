@@ -43,6 +43,8 @@ function EpisodeCard(props: {  series: Series;
   /** 2026-10-16：本话已拆解完时，「进入下一话」。此前该状态下按钮仍是
    *  「续写本话」，而它会去填**下一话**的第一批 —— 名实不符且用户无从察觉。 */
   onNextEpisode: () => void;
+  /** 2026-10-16：重新规划本话（推倒重写 summary，使其撑满规划容量且有张力）。 */
+  onReplan: (chapterId: string) => Promise<void>;
   onPreview: () => void;
   // —— 格级 ——
   onGeneratePanel: (pageId: string, panelIndex: number) => Promise<void>;
@@ -57,7 +59,7 @@ function EpisodeCard(props: {  series: Series;
   const {
     series, chapter, episodeIndex, episodeCount, onPrev, onNext, busy, taskProgress,
     onBreakdownBatch, onGenerateBatch, onRegenerateBatch, onRewriteBatch, onEditBatch,
-    onGenerateAllMissing, onContinue, onNextEpisode, onPreview,
+    onGenerateAllMissing, onContinue, onNextEpisode, onReplan, onPreview,
     onGeneratePanel, onRewritePanel, onUpdatePanelText, onUpdatePanelTextV2, onRewritePanelText,
   } = props;
 
@@ -79,6 +81,15 @@ function EpisodeCard(props: {  series: Series;
   // —— 整批改写折叠 ——
   const [batchRewriteOpen, setBatchRewriteOpen] = useState<string | null>(null);
   const [batchRewriteDraft, setBatchRewriteDraft] = useState('');
+
+  // —— 重新规划两步确认（会推倒重写 summary，4 秒未确认自动复位） ——
+  const [replanArmed, setReplanArmed] = useState(false);
+  const [replanBusy, setReplanBusy] = useState(false);
+  useEffect(() => {
+    if (!replanArmed) return;
+    const t = setTimeout(() => setReplanArmed(false), 5000);
+    return () => clearTimeout(t);
+  }, [replanArmed]);
 
   // —— 单格改写折叠 ——
   const [panelRewriteTarget, setPanelRewriteTarget] = useState<{ pageId: string; index: number } | null>(null);
@@ -232,6 +243,29 @@ function EpisodeCard(props: {  series: Series;
           </span>
         )}
         <span style={{ flex: 1 }} />
+        {/*
+          2026-10-16 新增「重新规划本话」。
+          之前三个生成入口全是"新建"，用户唯一能对已有话做的事是手动改字 ——
+          但"这一话太平了，给我一版有张力的"恰恰是最常出现的诉求。
+          两步确认：会推倒重写 summary，且已有分镜图会与新剧情对不上。
+        */}
+        <button
+          onClick={async () => {
+            if (replanArmed) {
+              setReplanArmed(false);
+              setReplanBusy(true);
+              try { await onReplan(chapter.id); } finally { setReplanBusy(false); }
+            } else {
+              setReplanArmed(true);
+            }
+          }}
+          disabled={busy}
+          className="btn btn--ghost"
+          style={{ fontSize: '0.75rem', color: replanArmed ? 'var(--danger)' : undefined }}
+          title="推倒重写本话剧情概要，使其撑满规划容量并具备戏剧张力；已有分镜图需要重新拆解才会与新剧情对上"
+        >
+          {busy && replanBusy ? '重新规划中…' : replanArmed ? '确认重新规划？（旧分镜需重拆）' : '重新规划本话'}
+        </button>
         <button onClick={onPreview} className="btn btn--ghost" style={{ color: 'var(--accent)' }}>公众号预览 ▸</button>
       </div>
 
@@ -362,6 +396,19 @@ function EpisodeCard(props: {  series: Series;
                         {panelState === 'error' && '⚠ 出错'}
                         {panelState === 'draft' && '草稿'}
                       </div>
+                      {/*
+                        2026-10-16：整批重画时，个别格失败会保留它原来的旧图（宁可留旧图也不要留空洞）。
+                        但这样「6 格齐全」就是假象 —— 用户以为自己也看过新版了。
+                        所以显式标出来，并说明为什么没更新。
+                      */}
+                      {panel.stale && panelHasImg && (
+                        <div
+                          title={panel.staleReason ? `本轮出图失败，这张是上次留下的旧图：${panel.staleReason}` : '这张是上次留下的旧图'}
+                          style={{ position: 'absolute', left: '0.25rem', top: '0.25rem', background: '#B0413E', color: '#FAF7EE', fontSize: '0.625rem', padding: '0.125rem 0.375rem', borderRadius: '3px', fontWeight: 600 }}
+                        >
+                          旧图
+                        </div>
+                      )}
                     </div>
                     <div style={{ padding: '0.5rem 0.625rem' }}>
                       <div className="kicker" style={{ fontSize: '0.5625rem' }}>第 {offset + panel.index} 格</div>

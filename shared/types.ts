@@ -239,6 +239,20 @@ export interface Panel {
   extraCharacters?: { name: string; appearance: string }[];
   /** 分镜图。生成后为 web 路径（/data/images/xxx.png），兼容历史 data URL。 */
   imageUrl?: string;
+  /**
+   * 这一格的图是**上一轮留下来的**，不是本轮生成的（2026-10-16 新增）。
+   *
+   * 场景：重画整批时，个别格出图失败。策略是保留它原来的旧图
+   * （宁可留旧图也不要留空洞，前面的钱已经花了），但这样一来
+   * 「6 格齐全」就可能是假象 —— 其中 1 格其实是上次的图，
+   * 而用户在界面上完全看不出来。
+   *
+   * 真正的代价不是那格图旧，是**用户以为自己看过新版了**。
+   * 所以把它显式标出来，而不是悄悄留在那儿。
+   */
+  stale?: boolean;
+  /** 变成旧图的原因（失败原因），用于在 UI 上说明为什么没更新。 */
+  staleReason?: string;
 }
 
 export type PageStatus = 'draft' | 'generating' | 'done' | 'error';

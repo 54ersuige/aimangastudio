@@ -1,0 +1,37 @@
+# 行尾策略（2026-10-16）
+#
+# 背景：本仓库原先没有 .gitattributes，且 core.autocrlf=true。
+# 结果是同一个文件在 Windows 检出为 CRLF、在 Linux 检出为 LF——
+# 对 DNA 完整性校验这种"按字节算 sha256"的东西，等于同一份内容在两台机器上
+# 算出两个哈希，报的是"行尾不同"而不是"内容被改过"。
+# （实测 new-yorker-noir.ts 是全目录唯一 CRLF 的文件，只有它长期报警。）
+#
+# checksum.ts 的 fingerprint() 现在会归一行尾与 BOM，那是第一道保险；
+# 这里把行尾固定住是第二道，让工作区不再产生整文件 diff。
+
+# DNA 预设：纯文本，强制 LF（生图 prompt 的来源，必须逐字节稳定）
+server/dna/*.ts text eol=lf
+docs/style-dna/*.md text eol=lf
+
+# 明确当作文本处理的文件
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# 二进制：禁止任何行尾/文本转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.mp4 binary

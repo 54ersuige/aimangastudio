@@ -468,10 +468,15 @@ router.post('/series/:id/pages/:pageId/regenerate', async (req, res) => {
           { onProgress: (d, t) => setTaskProgress(tid, Math.round((d / t) * 100)) },
         );
         const sortedPanels = [...targetPage.panels].sort((a, b) => a.index - b.index);
+        const reasonByIndex = new Map(failures.map(f => [f.panelIndex, f.reason]));
         // 重画路径：失败格保留它原来的旧图，不清空 —— 宁可留旧图也不要留空洞。
+        // 但必须标记 stale：否则「6 格齐全」是假象，其中那格其实还是上次的图，
+        // 而用户以为自己也看过新版了（2026-10-16 新增）。
         const updatedPanels = sortedPanels.map((p, i) => {
           const next = paths[i];
-          return next ? { ...p, imageUrl: next } : p;
+          if (next) return { ...p, imageUrl: next, stale: undefined, staleReason: undefined };
+          if (!p.imageUrl) return { ...p, stale: undefined, staleReason: undefined };
+          return { ...p, stale: true, staleReason: reasonByIndex.get(p.index) || '本轮出图失败' };
         });
         const updated = updatePage(series.id, targetChapter.id, targetPage.id, {
           panels: updatedPanels,

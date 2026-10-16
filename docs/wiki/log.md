@@ -197,3 +197,59 @@
 - 验证：typecheck exit 0；build exit 0；vitest 117 passed；真实数据 audit 四话全部被判打回
 - known-issue：现有 4 话 summary 生成于新规则之前，不会自动改写，需重新规划或手动扩写
 - 详见 [[chapter-drama-capacity]]
+## [2026-10-16] fix | GitHub 推送凭据：环境里的失效 GITHUB_TOKEN 抢占 gh 登录态
+- 症状：`git push` 报 Invalid username or token，但 `gh auth status` 显示账号是登入的
+- 根因：宿主进程环境里有一个**已失效**的 GITHUB_TOKEN（User 级，ghp_…），
+  gh 优先用它而不是 Windows 凭据管理器里那个有效登录态
+- 清掉 User 级变量后仍失败：宿主进程 env 仍持有旧值，每次新 shell 都从它继承，
+  **要重启宿主才会真正消失**
+- 根治：新增 `~/.local/bin/gh-cred.cmd` 包装器，内部先清空 GITHUB_TOKEN/GH_TOKEN
+  再调 gh auth git-credential，配置为 github.com 的 credential helper
+  —— 从此推送不再受污染环境影响
+- 验证：`git ls-remote origin` exit 0、`git push` exit 0（当时环境仍带坏 token）
+
+## [2026-10-16] fix | DNA checksum：报的是「行尾不同」，不是「内容被改」
+用户主推的 new-yorker-noir 长期报警。查下来是三个缺陷叠在一起：
+
+- `fingerprint()` 按原始字节算 sha256，而 core.autocrlf=true 且无 .gitattributes，
+  同一份内容 Windows 检出 CRLF / Linux 检出 LF → 两台机器两个哈希。
+  new-yorker-noir 是全目录**唯一** CRLF 文件，所以只有它报警
+- 行尾归一后仍与声明不符 → 声明本身也确实失效（且两个历史提交都对不上）
+- `DNA_DOCS_PATHS` 导出后**零调用**，checksum.ts 头注释承诺的 .md 镜像校验根本没写
+
+处理：fingerprint 归一行尾+BOM；新增 verifyDnaMirrors() 接上死代码并由启动时调用；
+4 个 DNA 重算声明、new-yorker-noir 行尾归一；新建 .gitattributes 固定行尾；
+新增 checksum.test.ts（12 项，含「内容真变了哈希必须变」防恒值退化那条）
+- 详见 [[dna-integrity-check]]
+
+## [2026-10-16] behavior-change | 一话容量：实跑之后抓出的四个问题
+前一版只做了代码审查和静态验证。真跑一次之后才暴露：
+
+- **prompt 字数要求与代码差整整一倍**：prompt 手写「pageCount=3 需 ≥180 字」，
+  代码实际要求 360 字。模型照 prompt 写必然被打回、反复返工直到停滞。
+  更糟的是测试把 bug 一起锁住了（断言 rule 里含 '120'/'180'）。
+  → 规则里的数字全部改为常量推导，并加测试断言「rule 下界 == 常量算出的下界」
+- **pageCount 三处自相矛盾**：append prompt 要 4 批但 schema 只允许 3；
+  generate-chapters 要 pageCount 之和 = 话数×4 而每话最多 3（永远达不到）；
+  UpdateChapterSchema 还能手动设到 8（「12-18 格」只对 AI 生效、对人不生效）
+  → 新增 feasibleTotalBatches() 把总数夹进真正可达的区间
+- **第一版实跑张力跑偏成暧昧**：453 字容量合格，但主角全程被动、没有代价、
+  冲突写成办公室言情暗示 → 规则补第 3/4/7 条（主动选择 / 有代价 / 暧昧≠冲突）
+- **没有「重新规划已有话」的入口**：三个生成端点全是新建。
+  → 新增 POST /series/:id/chapters/:chapterId/replan，两条硬线：
+  不静默丢已出好的图（pageCount 变小也不删已有批次）、如实返回 stalePanels 提示旧图已与新剧情脱节
+
+实跑四话结果（62-116s/话）：469/537/830/672 字 = 23/26/41/33 拍，需求 18 拍。
+**张力标准 4/4 达成**（主角主动选择 + 具体代价 + 结尾未解决）。
+- 但暴露两个新问题：(1) 判据只卡下限不管上限，比值 1.28-2.28
+  → checkChapterDensity() 阈值 1.5（照实测定的），**只提示不拦截**
+  (2) 四话全是「施压→拒绝→代价落在妈妈」同一形态，套路化才是可持续张力的真正威胁
+  → 规则补第 8/9 条；⚠ 这两条未实跑验证，下一话才生效
+
+## [2026-10-16] feat | 失败格保留旧图时显式标记
+整批重画失败格保留旧图的策略不变（宁可留旧图也不要留空洞），
+但「6 格齐全」可能是假象 —— 用户以为自己看过新版了。
+Panel 新增 stale / staleReason，重画失败时标记、成功时清除，界面打「旧图」红标。
+
+- 验证：npm run check exit 0；npm run build exit 0；vitest 148 passed（13 files）
+- 详见 [[chapter-drama-capacity]]

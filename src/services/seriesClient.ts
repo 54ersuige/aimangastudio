@@ -276,6 +276,24 @@ export async function appendNextChapter(
   });
 }
 
+/**
+ * 重新规划一话（2026-10-16 新增）。
+ *
+ * 三个生成入口全是「新建」，没有任何入口能改写已存在的某一话。
+ * 但用户最常要的恰恰是「这一话太平了，重新给一版有张力的」。
+ * notes / stalePanels 是给界面如实提示用的：旧分镜图是照着旧剧情画的。
+ */
+export async function replanChapter(
+  seriesId: string,
+  chapterId: string,
+  options: { hint?: string; keepTitle?: boolean } = {},
+): Promise<{ chapter: Chapter; notes: string[]; stalePanels: number }> {
+  return request(`/api/series/${seriesId}/chapters/${chapterId}/replan`, {
+    method: 'POST',
+    body: JSON.stringify({ hint: options.hint, keepTitle: options.keepTitle !== false }),
+  });
+}
+
 /** 兼容旧端点：直接挂顶层的 chapter 生成（无 arc 数据时）。 */
 export async function generateChapters(seriesId: string, targetPageCount = 12): Promise<{ chapters: Chapter[] }> {
   return request(`/api/series/${seriesId}/chapters/generate`, { method: 'POST', body: JSON.stringify({ targetPageCount }) });

@@ -39,7 +39,7 @@ export function SeriesWorkbench() {
     step, setStep,
     generateWorldviewForCurrent, generateCharactersForCurrent,
     addCharacterToCurrent, deleteCharacterFromCurrent, regenerateCharacterImageInCurrent, regenerateCharacterShotInCurrent,
-    generateArcsForCurrent, generateArcChaptersForCurrent, appendNextChapterForCurrent,
+    generateArcsForCurrent, generateArcChaptersForCurrent, appendNextChapterForCurrent, replanChapterForCurrent,
     generateChaptersForCurrent,
     selectedPageId, setSelectedPageId,
     selectedEpisodeId, setSelectedEpisodeId,
@@ -448,6 +448,9 @@ export function SeriesWorkbench() {
             // 2026-10-16：本话拆完后的主操作。此前这个状态下按钮显示「续写本话」，
             // 但它会跑去填下一话的第一批 —— 名实不符。现在显式跳到下一话。
             onNextEpisode={() => { if (currentEpisodeIndex < allChapters.length - 1) pickEpisode(allChapters[currentEpisodeIndex + 1].id); }}
+            // 2026-10-16：重新规划本话。推倒重写 summary，
+            // 让它真的撑满规划容量且有戏剧张力。
+            onReplan={async (chapterId) => { await replanChapterForCurrent(chapterId); }}
             busy={busy}
             taskProgress={taskProgress}
             onBreakdownBatch={async (pageId) => { await breakdownPageInCurrent(pageId); }}

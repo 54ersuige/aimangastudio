@@ -1,4 +1,4 @@
-// @dna-checksum: 16f45435156354ed5fdc45483ba9adef7b5d39638d10741d540e56b6fdfdc0e0
+// @dna-checksum: f64dc6cd890b47937f2a6b40bc2ea1caddd6af8dd2439e7978ba7350644b76c0
 /**
  * ═══════════════════════════════════════════════════════════════════════════
  *  DNA 预设一：New Yorker × Tomine 都市写实 × Graphic Novel（v1.1）
