@@ -252,28 +252,43 @@ export async function generateArcs(seriesId: string): Promise<{ arcs: Arc[] }> {
   return request(`/api/series/${seriesId}/arcs/generate`, { method: 'POST', body: JSON.stringify({}) });
 }
 
-/** 一次生成指定 arc 的所有 chapter（基于 arc.premise + 前情提要）。 */
+/**
+ * 一次生成指定 arc 的所有 chapter（基于 arc.premise + 前情提要）。
+ *
+ * 2026-10-16：改走 postTask（task 队列 + 进度轮询）。
+ * 此前是同步 HTTP 等待，实测要转 **8 分钟**（16:13 点 → 16:21 出结果，
+ * 中间还有一轮字数不够的整轮重写）。前端只有一句不动的「生成中…」，
+ * 用户据此以为失败又连点两次，第二次反撞 409「该季已有 chapter」。
+ * 长任务没有进度 = 每次都会重演这次误会。
+ */
 export async function generateArcChapters(
   seriesId: string,
   arcId: string,
   options: { targetPageCount?: number; hint?: string } = {},
+  opts: PostTaskOptions = {},
 ): Promise<{ arc: Arc; chapters: Chapter[] }> {
-  return request(`/api/series/${seriesId}/arcs/${arcId}/generate-chapters`, {
-    method: 'POST',
-    body: JSON.stringify({ targetPageCount: options.targetPageCount, hint: options.hint }),
-  });
+  return postTask<{ arc: Arc; chapters: Chapter[] }>(
+    `/api/series/${seriesId}/arcs/${arcId}/generate-chapters`,
+    { targetPageCount: options.targetPageCount, hint: options.hint },
+    opts,
+  );
 }
 
-/** 逐章生成：在指定 arc 末尾追加下一章。 */
+/**
+ * 逐章生成：在指定 arc 末尾追加下一章。
+ * 2026-10-16 同 generateArcChapters：改走 task 队列（实测单话 60~120s）。
+ */
 export async function appendNextChapter(
   seriesId: string,
   arcId: string,
   options: { pageCount?: number; hint?: string } = {},
+  opts: PostTaskOptions = {},
 ): Promise<{ arc: Arc; chapter: Chapter | null }> {
-  return request(`/api/series/${seriesId}/arcs/${arcId}/append-next-chapter`, {
-    method: 'POST',
-    body: JSON.stringify({ pageCount: options.pageCount, hint: options.hint }),
-  });
+  return postTask<{ arc: Arc; chapter: Chapter | null }>(
+    `/api/series/${seriesId}/arcs/${arcId}/append-next-chapter`,
+    { pageCount: options.pageCount, hint: options.hint },
+    opts,
+  );
 }
 
 /**
@@ -287,11 +302,13 @@ export async function replanChapter(
   seriesId: string,
   chapterId: string,
   options: { hint?: string; keepTitle?: boolean } = {},
+  opts: PostTaskOptions = {},
 ): Promise<{ chapter: Chapter; notes: string[]; stalePanels: number }> {
-  return request(`/api/series/${seriesId}/chapters/${chapterId}/replan`, {
-    method: 'POST',
-    body: JSON.stringify({ hint: options.hint, keepTitle: options.keepTitle !== false }),
-  });
+  return postTask<{ chapter: Chapter; notes: string[]; stalePanels: number }>(
+    `/api/series/${seriesId}/chapters/${chapterId}/replan`,
+    { hint: options.hint, keepTitle: options.keepTitle !== false },
+    opts,
+  );
 }
 
 /** 兼容旧端点：直接挂顶层的 chapter 生成（无 arc 数据时）。 */

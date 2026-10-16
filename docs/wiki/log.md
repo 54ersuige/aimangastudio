@@ -253,3 +253,50 @@ Panel 新增 stale / staleReason，重画失败时标记、成功时清除，界
 
 - 验证：npm run check exit 0；npm run build exit 0；vitest 148 passed（13 files）
 - 详见 [[chapter-drama-capacity]]
+## [2026-10-16] bugfix | 「生成话没反应」：它转了 8 分钟，而不是卡死
+用户原话：「生成话的时候，没有反应啊」。排查排除了服务/模型/队列/前端全部猜测后，
+从日志 kind 统计里看到真相：`arc-chapters` 请求 33 次、响应 27 次 —— 差的 6 次就是没回来的。
+
+完整时间线：
+- 16:13:33 用户第一次点
+- 16:19:25 第 1 次尝试返回，字数不够（371/368/353/346 < 要求 360）→ 整轮重写
+- 16:21:40 第 2 次成功，4 话生成完毕
+- 用户在 16:15 又点了一次 → 撞 409「该季已有 chapter」→ 局面更乱
+
+**两个独立缺陷：**
+
+1. **三个话目端点是同步 HTTP**，前端只有一句不动的「生成中…」。
+   8 分钟不动和真卡死长得一模一样，用户据此重蹈覆辙。
+   → 改走 runTask 队列，立刻返回 taskId；callStructuredJson 新增 onProgress；
+   重试阶段也上报（"内容不够，正在重写"是最容易被误判为卡死的时刻）；
+   重复点击返回人话 409「请等它跑完（通常 5~10 分钟）——不用重复点击」；
+   按钮旁加进度条并事先告知时长。
+
+2. **text 模型超时 240s，而批量出 4 话实测要 5~8 分钟** → 任务在 4 分钟处
+   被「请求超时」掐断，用户看到的是彻底失败。这条更阴险：
+   模型跑得快时能过去，属于「运气好时看起来没问题」。
+   → callStructuredJson 支持 per-call timeoutMs 覆盖，**每次尝试单独放宽**
+   （否则第 2 次重试会被第 1 次消耗的墙钟时间误伤）；
+   generate-chapters 480s，append/replan 300s。
+   **不全局抬高**：那会让所有短任务失败时也干等 10 分钟。
+
+为什么慢：M3 输出里 84% 是思考 token（21143 字符里 17783 是思考），
+它在纠结一个真实歧义 ——「把季"新人"…拆分成话目」里"新人"是季标题还是话内容。
+且 callStructuredJson 从未设 maxTokens，思考时长完全由模型自定。
+
+实测验证：HTTP 返回 0s 拿到 taskId · 重复点击被 409 挡 · 后台正常执行
+新增 server/series-routes/long-task-timeout.test.ts（11 项，锁超时/队列/人话提示）
+- 详见 [[long-task-progress]]
+### 补记：修超时覆盖时自己踩的坑
+
+造好了 attemptConfig 却仍然 `generateText(config, req)`。表面看「覆盖已实现」，
+测试也全绿（timeoutMs / perAttemptMs / attemptConfig 三个字符串都在），
+但超时一点没变 —— 又一次「请求超时（240s 内未返回）」。
+
+补的测试不只断言「覆盖对象存在」，而是断言它被用上了：
+    for (const site of HELPERS.match(/provider\.generateText\(\s*\w+\s*,/g) || [])
+      expect(site).toContain('attemptConfig');
+    expect(HELPERS).not.toMatch(/provider\.generateText\(\s*config\s*,/);
+
+**断言存在性 ≠ 断言生效性。** 静态断言查不出「造了但没传进去」，
+这类 bug 只有端到端真跑一次才会暴露 —— 而真跑这次撞上了 429 额度上限。

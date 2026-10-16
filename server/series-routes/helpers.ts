@@ -67,16 +67,49 @@ export async function callStructuredJson<T>(
     validate?: (raw: unknown) => T;
     logKind?: string;
     logMeta?: Record<string, unknown>;
+    /**
+     * 2026-10-16：重试进度回调。
+     *
+     * 为什么加这个：生成话目实测要转 **8 分钟**（16:13 点 → 16:21 出结果，
+     * 中间还有一次字数不够的整轮重写）。而按钮只有一句「生成中…」，
+     * 8 分钟不动和卡死长得一模一样 —— 用户据此以为没反应，又连点了两次，
+     * 后两次反而撞上 409「该季已有 chapter」，于是彻底乱套。
+     *
+     * 推理型模型一话要 60~120 秒（84% 是思考 token），批量出几话就是好几分钟。
+     * 这个时长**必须有进度可看**，否则每次都会重演。
+     */
+    onProgress?: (attempt: number, total: number, phase: string) => void;
+    /**
+     * 覆盖本次调用的超时（毫秒）。
+     *
+     * 2026-10-16 实测：批量生成话目（4 话）要 **5~8 分钟**，而 text 模型
+     * 默认 timeout 只有 240s（runtime-config.json 里存的就是 240000）
+     * → 任务在 4 分钟处被 `请求超时` 掐断，用户看到的是彻底失败。
+     *
+     * 之前那次 8 分钟成功的，属于模型恰好跑得快、赶上尾巴 —— 不可靠。
+     *
+     * 为什么不全局抬高：那会让所有短任务（角色生成、世界观）失败时
+     * 也干等 10 分钟才报错。**只有这类确定很慢的调用才覆盖。**
+     */
+    timeoutMs?: number;
   },
 ): Promise<T> {
   const config = getConfig().text;
-  const provider = getTextProvider(config);
   // 容错：模型输出 zod 校验失败时自动重试一次（temperature 略上调鼓励探索）。
   // 重试用更严格的提示追加。原 prompt 仍记录到日志便于排查。
   const MAX_RETRIES = 2;
+  // 每次尝试的上限。批量出 N 话，每话都是独立的一次完整推理。
+  // 默认给 6 分钟/次（4 话 + 重试能覆盖到 12 分钟），
+  // 与前端 TASK_DEFAULT_TIMEOUT_MS（30 分钟）留足余量。
+  const perAttemptMs = opts.timeoutMs ?? 360000;
+  // provider 用的是 config.timeout，这里必须按每次尝试单独放宽，
+  // 否则第 2 次重试会被第 1 次已经消耗掉的墙钟时间误伤。
+  const attemptConfig = { ...config, timeout: perAttemptMs };
+  const provider = getTextProvider(attemptConfig);
   let lastError: string | undefined;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     const isRetry = attempt > 0;
+    opts.onProgress?.(attempt, MAX_RETRIES, isRetry ? '内容不够，正在重写' : '正在构思');
     const attemptSystem = isRetry
       ? `${systemInstruction}\n\n⚠️ 上一次输出未通过 JSON 校验（${lastError ?? ''}）。请重新输出严格符合 schema 的 JSON object，不要任何额外文字、不要 markdown 代码块。`
       : systemInstruction;
@@ -95,7 +128,7 @@ export async function callStructuredJson<T>(
       attempt,
       ...opts.logMeta,
     });
-    const result = await provider.generateText(config, req);
+    const result = await provider.generateText(attemptConfig, req);
     // 记录原始响应到审计日志（排查 zod 失败最关键的信息）。
     logGeneration((opts.logKind || 'structured-text') + '-response', {
       model: config.model,

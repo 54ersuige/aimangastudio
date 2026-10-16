@@ -4,7 +4,7 @@ import { PlusIcon, RedoAltIcon } from '../icons';
 import { toRoman } from './ui';
 
 function ChaptersCard({
-  series, targetPages, setTargetPages, onGenerate, onGenerateArcs, onGenerateArcChapters, onAppendNextChapter, onPickEpisode, onEditChapter, onPreviewChapter, busy,
+  series, targetPages, setTargetPages, onGenerate, onGenerateArcs, onGenerateArcChapters, onAppendNextChapter, onPickEpisode, onEditChapter, onPreviewChapter, busy, taskProgress,
 }: {
   series: Series;
   targetPages: number;
@@ -17,6 +17,8 @@ function ChaptersCard({
   onEditChapter: (ch: Chapter) => void;
   onPreviewChapter: (ch: Chapter, chapterIndex: number) => void;
   busy: boolean;
+  /** 2026-10-16：长任务进度（话目生成实测 8 分钟，没进度会被当成卡死） */
+  taskProgress?: number | null;
 }) {
   const arcBlueprints = series.worldview?.arcBlueprints ?? [];
   const hasArcStructure = !!(series.arcs && series.arcs.length > 0);
@@ -87,6 +89,7 @@ function ChaptersCard({
                 arc={arc}
                 episodeOffset={episodeOffset}
                 busy={busy}
+                taskProgress={taskProgress}
                 targetPages={targetPages}
                 setTargetPages={setTargetPages}
                 onGenerateArcChapters={(opts) => onGenerateArcChapters(arc.id, opts || {})}
@@ -162,12 +165,14 @@ function ChaptersCard({
 }
 
 function ArcBlock({
-  arc, episodeOffset, busy, targetPages, setTargetPages, onGenerateArcChapters, onAppendNextChapter, onPickEpisode, onEditChapter, onPreviewChapter,
+  arc, episodeOffset, busy, taskProgress, targetPages, setTargetPages, onGenerateArcChapters, onAppendNextChapter, onPickEpisode, onEditChapter, onPreviewChapter,
 }: {
   arc: Arc;
   /** 本 arc 前面所有 arc 的话数之和 —— 用于"第 X 话"全局连续编号 */
   episodeOffset: number;
   busy: boolean;
+  /** 2026-10-16：长任务进度（话目生成实测 8 分钟，没进度会被当成卡死） */
+  taskProgress?: number | null;
   targetPages: number;
   setTargetPages: (n: number) => void;
   onGenerateArcChapters: (opts?: { targetPageCount?: number; hint?: string }) => Promise<Chapter[] | null>;
@@ -206,6 +211,21 @@ function ArcBlock({
           <button onClick={() => onGenerateArcChapters({ targetPageCount: targetPages })} disabled={busy} className="btn btn--primary">
             {busy ? '生成中…' : '生成本季话目 ▸'}
           </button>
+          {/*
+            2026-10-16：进度条。
+            实测这个调用要转 8 分钟（推理型模型，4 话 + 可能一轮整轮重写）。
+            此前按钮只有一句不动的「生成中…」，用户据此以为失败又连点两次，
+            第二次反撞 409 —— 8 分钟的正常等待被误判成故障。
+            长任务没进度 = 每次都会重演这次误会。
+          */}
+          {busy && taskProgress != null && (
+            <span className="kicker" style={{ fontSize: '0.625rem', color: 'var(--accent)', display: 'inline-flex', alignItems: 'center', gap: '0.375rem' }}>
+              <span style={{ display: 'inline-block', width: '4rem', height: '3px', background: 'var(--rule-soft)', borderRadius: '2px', overflow: 'hidden' }}>
+                <span style={{ display: 'block', height: '100%', width: `${taskProgress}%`, background: 'var(--accent)', transition: 'width 0.4s ease' }} />
+              </span>
+              {taskProgress}% · 通常 5~10 分钟，请勿重复点击
+            </span>
+          )}
           <span className="kicker" style={{ fontSize: '0.625rem', color: 'var(--ink-3)' }}>每话约 15 格（内部按 6 格/批生成）</span>
         </div>
       )}

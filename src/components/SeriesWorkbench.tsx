@@ -426,6 +426,7 @@ export function SeriesWorkbench() {
           onEditChapter={(ch) => setEditingChapter(ch)}
           onPreviewChapter={(ch, index) => setPreviewChapter({ ch, index })}
           busy={busy}
+          taskProgress={taskProgress}
         />
       </CardSection>
 

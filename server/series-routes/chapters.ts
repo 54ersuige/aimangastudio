@@ -5,6 +5,7 @@ import { getSeries, updateSeries, appendChaptersToArc, setChapters, updateChapte
 import type { Chapter, Arc } from '../series-store.js';
 import { callStructuredJson, seriesDnaKey, ChapterListZ } from './helpers.js';
 import { CHAPTER_CAPACITY_RULE, checkChapterCapacity, checkChapterDensity, PANELS_PER_BATCH, BATCHES_PER_EPISODE_MIN, BATCHES_PER_EPISODE_MAX, PANELS_PER_EPISODE_MIN, PANELS_PER_EPISODE_MAX, feasibleTotalBatches } from './chapter-capacity.js';
+import { runTask, setTaskProgress, DuplicateTaskError } from '../task-queue.js';
 
 const router = Router();
 
@@ -90,49 +91,71 @@ router.post('/series/:id/arcs/:arcId/generate-chapters', async (req, res) => {
   // prompt 与 schema 互相矛盾。现在按可达区间夹一次。
   const totalPages = feasibleTotalBatches(Number(req.body?.targetPageCount ?? arc.plannedChapterCount * BATCHES_PER_EPISODE_MAX), arc.plannedChapterCount, arc.plannedChapterCount, arc.plannedChapterCount);
   const hint = String(req.body?.hint ?? '').trim().slice(0, 2000) || undefined;
+  // 2026-10-16：改走 task 队列。
+  // 实测这次调用要转 8 分钟（推理型模型一话 60~120s，4 话 + 一次整轮重写）。
+  // 同步等在后端 HTTP 连接上，前端只有一个不会动的「生成中…」——
+  // 用户据此以为没反应又连点两次，第二次反而撞上 409，局面彻底乱套。
+  // 现在立刻返回 taskId，前端轮询进度；同 key 并发点击由 DuplicateTaskError 挡住。
+  let taskId: string;
   try {
-    const w = series.worldview;
-    // 前情提要：所有前置 arc 的 chapter summary 列表
-    const priorArcs = (series.arcs ?? []).filter(a => a.index < arc.index);
-    const priorBlock = priorArcs.length > 0
-      ? `\n\n前情提要（这些已经发生，不能重复）：\n${priorArcs.map(a => `【${a.title}】\n${a.chapters.map(c => `- ${c.title}：${c.summary}`).join('\n')}`).join('\n\n')}\n`
-      : '';
-    const plotOutline = w.plotOutline ?? w.background;
-    const conflicts = w.conflicts ?? [];
-    const conflictsBlock = conflicts.length > 0 ? `\n核心矛盾：${conflicts.join('；')}` : '';
-    const prompt = `把季"${arc.title}"（${arc.premise}）拆分成话目。${priorBlock}\n\n剧情总纲：${plotOutline}${conflictsBlock}\n\n世界观：\n时代：${w.era}\n背景：${w.background}\n风格：${w.artStyle}\n\n故事简介：${series.logline}\n\n角色：${series.characters.map(c => `${c.name}（${c.role}）`).join('、')}\n\n本季计划话数：${arc.plannedChapterCount} 话。请按 arc premise 拆出 ${arc.plannedChapterCount} 话，每话一件完整的事（有起承转合），话标题禁止包含「章/卷/话/页」等结构字；每话 pageCount（内部批次数）2-3，之和 ≈ ${totalPages}（AI 自由决定，只要总数在这个范围）。${hint ? `\n\n用户修改意见：${hint}` : ''}${CHAPTER_CAPACITY_RULE}`;
-    const result = await callStructuredJson<z.infer<typeof ChapterListZ>>(
-      prompt,
-      '你是一位漫画编剧。请输出严格的 JSON 格式。',
-      ChaptersSchema as Record<string, unknown>,
-      {
-        dnaKey,
-        logKind: 'arc-chapters',
-        logMeta: { seriesId: series.id, arcId: arc.id, targetPageCount: totalPages },
-        validate: raw => validateChapterCapacity(ChapterListZ.parse(raw)),
-      },
-    );
-    const chapters: Chapter[] = result.chapters.map(ch => ({
-      id: crypto.randomUUID(),
-      arcId: arc.id,
-      title: ch.title,
-      summary: ch.summary,
-      pageCount: ch.pageCount,
-      pages: Array.from({ length: ch.pageCount }, (_, i) => ({
+    taskId = runTask(`arc-chapters:${arc.id}`, 'arc-chapters', async (tid) => {
+      const w = series.worldview!;
+      // 前情提要：所有前置 arc 的 chapter summary 列表
+      const priorArcs = (series.arcs ?? []).filter(a => a.index < arc.index);
+      const priorBlock = priorArcs.length > 0
+        ? `\n\n前情提要（这些已经发生，不能重复）：\n${priorArcs.map(a => `【${a.title}】\n${a.chapters.map(c => `- ${c.title}：${c.summary}`).join('\n')}`).join('\n\n')}\n`
+        : '';
+      const plotOutline = w.plotOutline ?? w.background;
+      const conflicts = w.conflicts ?? [];
+      const conflictsBlock = conflicts.length > 0 ? `\n核心矛盾：${conflicts.join('；')}` : '';
+      const prompt = `把季"${arc.title}"（${arc.premise}）拆分成话目。${priorBlock}\n\n剧情总纲：${plotOutline}${conflictsBlock}\n\n世界观：\n时代：${w.era}\n背景：${w.background}\n风格：${w.artStyle}\n\n故事简介：${series.logline}\n\n角色：${series.characters.map(c => `${c.name}（${c.role}）`).join('、')}\n\n本季计划话数：${arc.plannedChapterCount} 话。请按 arc premise 拆出 ${arc.plannedChapterCount} 话，每话一件完整的事（有起承转合），话标题禁止包含「章/卷/话/页」等结构字；每话 pageCount（内部批次数）2-3，之和 ≈ ${totalPages}（AI 自由决定，只要总数在这个范围）。${hint ? `\n\n用户修改意见：${hint}` : ''}${CHAPTER_CAPACITY_RULE}`;
+      const result = await callStructuredJson<z.infer<typeof ChapterListZ>>(
+        prompt,
+        '你是一位漫画编剧。请输出严格的 JSON 格式。',
+        ChaptersSchema as Record<string, unknown>,
+        {
+          dnaKey,
+          logKind: 'arc-chapters',
+          logMeta: { seriesId: series.id, arcId: arc.id, targetPageCount: totalPages },
+          // 2026-10-16：实测 4 话要 5~8 分钟，text 默认超时 240s 会中途掐断。
+          timeoutMs: 480000,
+          validate: raw => validateChapterCapacity(ChapterListZ.parse(raw)),
+          // 0-49% 留给第 1 次尝试，50-99% 留给重写，让进度条真的在动。
+          onProgress: (attempt, total, phase) => {
+            const base = attempt / total;
+            setTaskProgress(tid, Math.round(base * 100));
+            console.log(`[arc-chapters] progress ${Math.round(base * 100)}% (${phase})`);
+          },
+        },
+      );
+      setTaskProgress(tid, 99);
+      const chapters: Chapter[] = result.chapters.map(ch => ({
         id: crypto.randomUUID(),
-        pageNumber: i + 1, // setChapters/appendChaptersToArc 会按全局重新编号
-        title: `第 ${i + 1} 批`,
-        sceneDescription: '',
-        panels: [],
-        characterIds: [],
-        status: 'draft' as const,
-      })),
-    }));
-    const appended = appendChaptersToArc(series.id, arc.id, chapters);
-    res.json({ arc, chapters: appended });
+        arcId: arc.id,
+        title: ch.title,
+        summary: ch.summary,
+        pageCount: ch.pageCount,
+        pages: Array.from({ length: ch.pageCount }, (_, i) => ({
+          id: crypto.randomUUID(),
+          pageNumber: i + 1, // setChapters/appendChaptersToArc 会按全局重新编号
+          title: `第 ${i + 1} 批`,
+          sceneDescription: '',
+          panels: [],
+          characterIds: [],
+          status: 'draft' as const,
+        })),
+      }));
+      const appended = appendChaptersToArc(series.id, arc.id, chapters);
+      setTaskProgress(tid, 100);
+      return { arc, chapters: appended };
+    });
   } catch (e: any) {
-    sendError(res, 502, e.message || 'Chapter generation failed');
+    if (e instanceof DuplicateTaskError) {
+      return sendError(res, 409, '本季正在生成话目，请等它跑完（通常 5~10 分钟）——不用重复点击。');
+    }
+    return sendError(res, 500, e.message || 'Chapter generation failed');
   }
+  res.json({ taskId });
 });
 
 // -------- 逐章生成：在指定 arc 末尾追加下一章（按 plot 推演） --------
@@ -151,69 +174,84 @@ router.post('/series/:id/arcs/:arcId/append-next-chapter', async (req, res) => {
     Math.min(BATCHES_PER_EPISODE_MAX, Number(req.body?.pageCount) || BATCHES_PER_EPISODE_MAX),
   );
   const hint = String(req.body?.hint ?? '').trim().slice(0, 2000) || undefined;
+  // 2026-10-16：同 generate-chapters 改走 task 队列（实测单话也要 60~120s）。
+  let taskId: string;
   try {
-    const w = series.worldview;
-    const priorChapters = arc.chapters;
-    const priorBlock = priorChapters.length > 0
-      ? `\n\n本季已生成话目（不要重复，直接续写）：\n${priorChapters.map(c => `- ${c.title}：${c.summary}`).join('\n')}\n`
-      : '';
-    const priorArcs = (series.arcs ?? []).filter(a => a.index < arc.index);
-    const priorArcsBlock = priorArcs.length > 0
-      ? `\n\n前季剧情：\n${priorArcs.map(a => `【${a.title}】\n${a.chapters.map(c => `- ${c.title}：${c.summary}`).join('\n')}`).join('\n\n')}\n`
-      : '';
-    const prompt = `为连载「${series.title}」的 "${arc.title}"（${arc.premise}）续写下一话。${priorArcsBlock}${priorBlock}\n\n世界观：\n时代：${w.era}\n背景：${w.background}\n风格：${w.artStyle}\n\n故事简介：${series.logline}\n\n角色：${series.characters.map(c => `${c.name}（${c.role}）`).join('、')}\n\n请只输出一个 chapter（${targetPages} 个内部批次，每批 ${PANELS_PER_BATCH} 格），summary 必须承接上一话结尾自然推进剧情。话标题禁止包含「章/卷/话/页」等结构字。${hint ? `\n\n用户修改意见：${hint}` : ''}${CHAPTER_CAPACITY_RULE}`;
-    const result = await callStructuredJson<{ chapter: { title: string; summary: string; pageCount: number } }>(
-      prompt,
-      '你是一位漫画编剧。请输出严格的 JSON 格式。',
-      {
-        type: 'object',
-        properties: {
-          chapter: {
-            type: 'object',
-            properties: {
-              title: { type: 'string' },
-              summary: { type: 'string' },
-              pageCount: { type: 'integer', minimum: 2, maximum: 3 },
+    taskId = runTask(`append-chapter:${arc.id}`, 'append-chapter', async (tid) => {
+      const w = series.worldview!;
+      const priorChapters = arc.chapters;
+      const priorBlock = priorChapters.length > 0
+        ? `\n\n本季已生成话目（不要重复，直接续写）：\n${priorChapters.map(c => `- ${c.title}：${c.summary}`).join('\n')}\n`
+        : '';
+      const priorArcs = (series.arcs ?? []).filter(a => a.index < arc.index);
+      const priorArcsBlock = priorArcs.length > 0
+        ? `\n\n前季剧情：\n${priorArcs.map(a => `【${a.title}】\n${a.chapters.map(c => `- ${c.title}：${c.summary}`).join('\n')}`).join('\n\n')}\n`
+        : '';
+      const prompt = `为连载「${series.title}」的 "${arc.title}"（${arc.premise}）续写下一话。${priorArcsBlock}${priorBlock}\n\n世界观：\n时代：${w.era}\n背景：${w.background}\n风格：${w.artStyle}\n\n故事简介：${series.logline}\n\n角色：${series.characters.map(c => `${c.name}（${c.role}）`).join('、')}\n\n请只输出一个 chapter（${targetPages} 个内部批次，每批 ${PANELS_PER_BATCH} 格），summary 必须承接上一话结尾自然推进剧情。话标题禁止包含「章/卷/话/页」等结构字。${hint ? `\n\n用户修改意见：${hint}` : ''}${CHAPTER_CAPACITY_RULE}`;
+      const result = await callStructuredJson<{ chapter: { title: string; summary: string; pageCount: number } }>(
+        prompt,
+        '你是一位漫画编剧。请输出严格的 JSON 格式。',
+        {
+          type: 'object',
+          properties: {
+            chapter: {
+              type: 'object',
+              properties: {
+                title: { type: 'string' },
+                summary: { type: 'string' },
+                pageCount: { type: 'integer', minimum: BATCHES_PER_EPISODE_MIN, maximum: BATCHES_PER_EPISODE_MAX },
+              },
+              required: ['title', 'summary', 'pageCount'],
             },
-            required: ['title', 'summary', 'pageCount'],
+          },
+          required: ['chapter'],
+        } as Record<string, unknown>,
+        {
+          dnaKey,
+          logKind: 'append-chapter',
+          logMeta: { seriesId: series.id, arcId: arc.id, pageCount: targetPages },
+          timeoutMs: 300000,
+          onProgress: (attempt, total, phase) => {
+            setTaskProgress(tid, Math.round((attempt / total) * 100));
+            console.log(`[append-chapter] progress ${Math.round((attempt / total) * 100)}% (${phase})`);
+          },
+          validate: raw => {
+            const v = z.object({ chapter: z.object({ title: z.string().min(1), summary: z.string().min(1), pageCount: z.number().int().min(BATCHES_PER_EPISODE_MIN).max(BATCHES_PER_EPISODE_MAX) }) }).parse(raw);
+            // 2026-10-15：summary 撑不起格数就打回，不能留一堆空批次。
+            const problem = checkChapterCapacity(v.chapter.summary, v.chapter.pageCount);
+            if (problem) throw new Error(problem);
+            return v;
           },
         },
-        required: ['chapter'],
-      } as Record<string, unknown>,
-      {
-        dnaKey,
-        logKind: 'append-chapter',
-        logMeta: { seriesId: series.id, arcId: arc.id, pageCount: targetPages },
-        validate: raw => {
-          const v = z.object({ chapter: z.object({ title: z.string().min(1), summary: z.string().min(1), pageCount: z.number().int().min(2).max(3) }) }).parse(raw);
-          // 2026-10-15：summary 撑不起格数就打回，不能留一堆空批次。
-          const problem = checkChapterCapacity(v.chapter.summary, v.chapter.pageCount);
-          if (problem) throw new Error(problem);
-          return v;
-        },
-      },
-    );
-    const newChapter: Chapter = {
-      id: crypto.randomUUID(),
-      arcId: arc.id,
-      title: result.chapter.title,
-      summary: result.chapter.summary,
-      pageCount: result.chapter.pageCount,
-      pages: Array.from({ length: result.chapter.pageCount }, (_, i) => ({
+      );
+      setTaskProgress(tid, 99);
+      const newChapter: Chapter = {
         id: crypto.randomUUID(),
-        pageNumber: i + 1,
-        title: `第 ${i + 1} 批`,
-        sceneDescription: '',
-        panels: [],
-        characterIds: [],
-        status: 'draft' as const,
-      })),
-    };
-    const appended = appendChaptersToArc(series.id, arc.id, [newChapter]);
-    res.json({ arc, chapter: appended?.[0] ?? null });
+        arcId: arc.id,
+        title: result.chapter.title,
+        summary: result.chapter.summary,
+        pageCount: result.chapter.pageCount,
+        pages: Array.from({ length: result.chapter.pageCount }, (_, i) => ({
+          id: crypto.randomUUID(),
+          pageNumber: i + 1,
+          title: `第 ${i + 1} 批`,
+          sceneDescription: '',
+          panels: [],
+          characterIds: [],
+          status: 'draft' as const,
+        })),
+      };
+      const appended = appendChaptersToArc(series.id, arc.id, [newChapter]);
+      setTaskProgress(tid, 100);
+      return { arc, chapter: appended?.[0] ?? null };
+    });
   } catch (e: any) {
-    sendError(res, 502, e.message || 'Append chapter failed');
+    if (e instanceof DuplicateTaskError) {
+      return sendError(res, 409, '本季正在生成下一话，请等它跑完（通常 1~3 分钟）——不用重复点击。');
+    }
+    return sendError(res, 500, e.message || 'Append chapter failed');
   }
+  res.json({ taskId });
 });
 
 // 手动编辑：保存 chapter 元数据（标题/剧情摘要/核心冲突/预计页数）
@@ -263,18 +301,21 @@ router.post('/series/:id/chapters/:chapterId/replan', async (req, res) => {
   const dnaKey = seriesDnaKey(series);
   const hint = String(req.body?.hint ?? '').trim().slice(0, 2000) || undefined;
   const keepTitle = req.body?.keepTitle !== false;
-  const notes: string[] = [];
+  // 2026-10-16：同另两个端点改走 task 队列（实测 62~116s）。
+  let taskId: string;
   try {
-    const w = series.worldview;
-    const siblings = arc.chapters.filter(c => c.id !== chapter.id);
-    const otherBlock = siblings.length > 0
-      ? `\n\n本季其他话（不要重复它们那件事）：\n${siblings.map(c => `- ${c.title}：${c.summary}`).join('\n')}\n`
-      : '';
-    const prevChapters = arc.chapters.slice(0, arc.chapters.indexOf(chapter));
-    const prevBlock = prevChapters.length > 0
-      ? `\n\n本话之前已发生（作为前情，不要重复）：\n${prevChapters.map(c => `- ${c.title}：${c.summary}`).join('\n')}\n`
-      : '';
-    const prompt = `为连载「${series.title}」重新规划其中一话。${otherBlock}${prevBlock}
+    taskId = runTask(`replan-chapter:${chapter.id}`, 'replan-chapter', async (tid) => {
+      const notes: string[] = [];
+      const w = series.worldview!;
+      const siblings = arc.chapters.filter(c => c.id !== chapter.id);
+      const otherBlock = siblings.length > 0
+        ? `\n\n本季其他话（不要重复它们那件事）：\n${siblings.map(c => `- ${c.title}：${c.summary}`).join('\n')}\n`
+        : '';
+      const prevChapters = arc.chapters.slice(0, arc.chapters.indexOf(chapter));
+      const prevBlock = prevChapters.length > 0
+        ? `\n\n本话之前已发生（作为前情，不要重复）：\n${prevChapters.map(c => `- ${c.title}：${c.summary}`).join('\n')}\n`
+        : '';
+      const prompt = `为连载「${series.title}」重新规划其中一话。${otherBlock}${prevBlock}
 这一话现在叫「${chapter.title}」，当前剧情概要（**太弱，要推倒重写，不要在它基础上小修小补**）：\n${chapter.summary}
 
 世界观：\n时代：${w.era}\n背景：${w.background}\n风格：${w.artStyle}
@@ -286,74 +327,86 @@ ${keepTitle ? `话标题沿用「${chapter.title}」，不要改。` : '话标�
 summary 必须满足下面全部要求：
 ${CHAPTER_CAPACITY_RULE}
 ${hint ? `\n用户修改意见：${hint}` : ''}`;
-    const result = await callStructuredJson<{ chapter: { title: string; summary: string; pageCount: number } }>(
-      prompt,
-      '你是一位漫画编剧。请输出严格的 JSON 格式。',
-      {
-        type: 'object',
-        properties: {
-          chapter: {
-            type: 'object',
-            properties: {
-              title: { type: 'string' },
-              summary: { type: 'string', description: `必须能拆出恰好 pageCount×${PANELS_PER_BATCH} 个画面点，每点一句话，有戏剧张力，结尾留未解决的悬念` },
-              pageCount: { type: 'integer', minimum: BATCHES_PER_EPISODE_MIN, maximum: BATCHES_PER_EPISODE_MAX },
+      const result = await callStructuredJson<{ chapter: { title: string; summary: string; pageCount: number } }>(
+        prompt,
+        '你是一位漫画编剧。请输出严格的 JSON 格式。',
+        {
+          type: 'object',
+          properties: {
+            chapter: {
+              type: 'object',
+              properties: {
+                title: { type: 'string' },
+                summary: { type: 'string', description: `必须能拆出恰好 pageCount×${PANELS_PER_BATCH} 个画面点，每点一句话，有戏剧张力，结尾留未解决的悬念` },
+                pageCount: { type: 'integer', minimum: BATCHES_PER_EPISODE_MIN, maximum: BATCHES_PER_EPISODE_MAX },
+              },
+              required: ['title', 'summary', 'pageCount'],
             },
-            required: ['title', 'summary', 'pageCount'],
+          },
+          required: ['chapter'],
+        } as Record<string, unknown>,
+        {
+          dnaKey,
+          logKind: 'replan-chapter',
+          logMeta: { seriesId: series.id, arcId: arc.id, chapterId: chapter.id },
+          timeoutMs: 300000,
+          onProgress: (attempt, total, phase) => {
+            setTaskProgress(tid, Math.round((attempt / total) * 100));
+            console.log(`[replan-chapter] progress ${Math.round((attempt / total) * 100)}% (${phase})`);
+          },
+          validate: raw => {
+            const v = z.object({ chapter: z.object({
+              title: z.string().min(1),
+              summary: z.string().min(1),
+              pageCount: z.number().int().min(BATCHES_PER_EPISODE_MIN).max(BATCHES_PER_EPISODE_MAX),
+            }) }).parse(raw);
+            const problem = checkChapterCapacity(v.chapter.summary, v.chapter.pageCount);
+            if (problem) throw new Error(problem);
+            return v;
           },
         },
-        required: ['chapter'],
-      } as Record<string, unknown>,
-      {
-        dnaKey,
-        logKind: 'replan-chapter',
-        logMeta: { seriesId: series.id, arcId: arc.id, chapterId: chapter.id },
-        validate: raw => {
-          const v = z.object({ chapter: z.object({
-            title: z.string().min(1),
-            summary: z.string().min(1),
-            pageCount: z.number().int().min(BATCHES_PER_EPISODE_MIN).max(BATCHES_PER_EPISODE_MAX),
-          }) }).parse(raw);
-          const problem = checkChapterCapacity(v.chapter.summary, v.chapter.pageCount);
-          if (problem) throw new Error(problem);
-          return v;
-        },
-      },
-    );
-    const next = result.chapter;
-    const oldPanels = chapter.pages.reduce((n, p) => n + p.panels.filter(x => x.imageUrl).length, 0);
-    const pages = [...chapter.pages];
-    // 变大 → 补空批次；变小 → 不删已有批次（那里面有用户已经付过钱的图）
-    while (pages.length < next.pageCount) {
-      pages.push({
-        id: crypto.randomUUID(),
-        pageNumber: pages.length + 1,
-        title: `第 ${pages.length + 1} 批`,
-        sceneDescription: '',
-        panels: [],
-        characterIds: [],
-        status: 'draft' as const,
+      );
+      setTaskProgress(tid, 99);
+      const next = result.chapter;
+      const oldPanels = chapter.pages.reduce((n, p) => n + p.panels.filter(x => x.imageUrl).length, 0);
+      const pages = [...chapter.pages];
+      // 变大 → 补空批次；变小 → 不删已有批次（那里面有用户已经付过钱的图）
+      while (pages.length < next.pageCount) {
+        pages.push({
+          id: crypto.randomUUID(),
+          pageNumber: pages.length + 1,
+          title: `第 ${pages.length + 1} 批`,
+          sceneDescription: '',
+          panels: [],
+          characterIds: [],
+          status: 'draft' as const,
+        });
+      }
+      if (pages.length !== next.pageCount) {
+        notes.push(`保留了你已拆解的 ${pages.length} 个批次（不删除已有分镜），实际容量按 ${pages.length} 批计。`);
+      }
+      if (oldPanels > 0) {
+        notes.push(`这一话已有 ${oldPanels} 格分镜图，它们是照着**旧剧情**画的，重新规划后需要重新拆解才会与新剧情对上。`);
+      }
+      // 2026-10-16：过密只提示不拦截（加严会把用户重新推进「反复报错、停滞不前」）。
+      const density = checkChapterDensity(next.summary, pages.length);
+      if (density) notes.push(density);
+      const updated = updateChapter(series.id, chapter.id, {
+        title: keepTitle ? chapter.title : next.title,
+        summary: next.summary,
+        pageCount: pages.length,
+        pages,
       });
-    }
-    if (pages.length !== next.pageCount) {
-      notes.push(`保留了你已拆解的 ${pages.length} 个批次（不删除已有分镜），实际容量按 ${pages.length} 批计。`);
-    }
-    if (oldPanels > 0) {
-      notes.push(`这一话已有 ${oldPanels} 格分镜图，它们是照着**旧剧情**画的，重新规划后需要重新拆解才会与新剧情对上。`);
-    }
-    // 2026-10-16：过密只提示不拦截（加严会把用户重新推进「反复报错、停滞不前」）。
-    const density = checkChapterDensity(next.summary, pages.length);
-    if (density) notes.push(density);
-    const updated = updateChapter(series.id, chapter.id, {
-      title: keepTitle ? chapter.title : next.title,
-      summary: next.summary,
-      pageCount: pages.length,
-      pages,
+      setTaskProgress(tid, 100);
+      return { chapter: updated, notes, stalePanels: oldPanels };
     });
-    res.json({ chapter: updated, notes, stalePanels: oldPanels });
   } catch (e: any) {
-    sendError(res, 502, e.message || 'Replan failed');
+    if (e instanceof DuplicateTaskError) {
+      return sendError(res, 409, '这一话正在重新规划，请等它跑完（通常 1~3 分钟）——不用重复点击。');
+    }
+    return sendError(res, 500, e.message || 'Replan failed');
   }
+  res.json({ taskId });
 });
 
 // —— 公众号发布文案（话级）：AI 生成 副题 / 结尾金句 / 下话预告，保存到章上 ——

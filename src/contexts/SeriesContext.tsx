@@ -415,7 +415,9 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
     if (!currentSeries) return null;
     setBusy(true); setError(null);
     try {
-      const res = await generateArcChapters(currentSeries.id, arcId, opts);
+      // 2026-10-16：report 传 true —— 这个任务实测要 8 分钟，
+      // 不给进度用户会以为没反应（然后连点，反而把局面搞乱）。
+      const res = await generateArcChapters(currentSeries.id, arcId, opts, progressOpts(true));
       await refreshCurrent();
       setStep('pages');
       // 默认跳到该季首章首页
@@ -427,14 +429,15 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
       return null;
     } finally {
       setBusy(false);
+      setTaskProgress(null);
     }
-  }, [currentSeries, refreshCurrent]);
+  }, [currentSeries, refreshCurrent, progressOpts]);
 
   const appendChapter = useCallback(async (arcId: string, opts?: { pageCount?: number; hint?: string }) => {
     if (!currentSeries) return null;
     setBusy(true); setError(null);
     try {
-      const res = await appendNextChapter(currentSeries.id, arcId, opts);
+      const res = await appendNextChapter(currentSeries.id, arcId, opts, progressOpts(true));
       await refreshCurrent();
       if (res.chapter?.pages?.[0]) setSelectedPageId(res.chapter.pages[0].id);
       return res.chapter;
@@ -443,8 +446,9 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
       return null;
     } finally {
       setBusy(false);
+      setTaskProgress(null);
     }
-  }, [currentSeries, refreshCurrent]);
+  }, [currentSeries, refreshCurrent, progressOpts]);
 
   // 2026-10-16 新增：重新规划某一话（推倒重写 summary）。
   // 与 appendChapter 的区别：不新建，而是改写已存在的那一话。
@@ -452,7 +456,7 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
     if (!currentSeries) return null;
     setBusy(true); setError(null);
     try {
-      const res = await replanChapterApi(currentSeries.id, chapterId, opts);
+      const res = await replanChapterApi(currentSeries.id, chapterId, opts, progressOpts(true));
       await refreshCurrent();
       return res;
     } catch (e: any) {
@@ -460,8 +464,9 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
       return null;
     } finally {
       setBusy(false);
+      setTaskProgress(null);
     }
-  }, [currentSeries, refreshCurrent]);
+  }, [currentSeries, refreshCurrent, progressOpts]);
 
   // —— Step 4 核心实现：显式 pageId 版本（话级 UI 用，不依赖 selectedPageId） ——
 
