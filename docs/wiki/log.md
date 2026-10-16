@@ -166,6 +166,7 @@
 - 刻意保留（资产非产物）：docs/references/*.png(4.16MB 生图要读) · public/og.webp(1.13MB README 用)
 - 判据写进 .gitignore 注释：删掉后应用还能不能正常画图 / 文档里还有没有引用
 - 已推送 https://github.com/54ersuige/aimangastudio（origin），原作者保留为 upstream 只读
+
 ## [2026-10-15] behavior-change | 审核标准下调（用户拍板：轻量化，别停滞）
 依据是 6 格真实出跑的审计数据：5 格里 4 格烧满 3 次重试（126s~265s/格），
 而用户看原图的评价是「故事说得清、情绪也对」—— 这些重试基本白花。
@@ -178,3 +179,21 @@
 - 补 7 项测试（isAlignmentAcceptable 判据 + 阈值断言同步）
 - 验证：typecheck exit 0；vitest 98 passed（原 91）
 - 详见 [[review-thresholds-relaxed]]
+
+## [2026-10-16] behavior-change | 一话必须有戏剧张力：规划时校验 summary 撑不撑得起它声明的格数
+用户澄清发布模型：**一话 = 一天 = 一条长图 = 一次发布**（此前误以为 page 是发布单位）。
+故「每话 12-18 格」不是体量审美指标，而是「这一话够不够演完一件有戏剧张力的事」。
+
+- 实测四话 summary 字数 104/104/102/101，pageCount 全 3（→18 格容量），但各只够约 5 拍
+- 决定性证据：《报到》6 格与 summary 的 6 句话一一对应，一格不差 → 剩下 12 格是空批次
+- 新增 server/series-routes/chapter-capacity.ts：判据唯一来源，三处规划入口共用同一函数与同一段 prompt
+- 判据用「画面点估计」（字数 ÷ 20）而非数句子 —— 模型爱写长句，数句子会系统性低估导致误杀
+- pageCount 此前四处不一致（1-12 / 2-6 / 2-8 / 2-8），「12-18 格」在规划阶段从未被强制过，现统一 2-3
+- prompt 增加戏剧张力硬要求：必须有冲突或转折、结尾停在未解决处、禁止同义句凑字数
+- 界面进度分「规划容量 / 已拆解 / 已出图」，去掉误导的「低于目标要续写」
+- 按钮语义统一：本话有空批次→「拆解第 N 批」，本话全满→「进入下一话」
+  （此前该状态下按钮叫「续写本话」却去填下一话，名实不符）
+- 新增 tools/capacity-audit.ts + 15 项测试
+- 验证：typecheck exit 0；build exit 0；vitest 117 passed；真实数据 audit 四话全部被判打回
+- known-issue：现有 4 话 summary 生成于新规则之前，不会自动改写，需重新规划或手动扩写
+- 详见 [[chapter-drama-capacity]]

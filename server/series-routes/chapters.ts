@@ -4,8 +4,18 @@ import { sendError } from '../utils.js';
 import { getSeries, updateSeries, appendChaptersToArc, setChapters, updateChapter, moveChapter, removeChapter } from '../series-store.js';
 import type { Chapter, Arc } from '../series-store.js';
 import { callStructuredJson, seriesDnaKey, ChapterListZ } from './helpers.js';
+import { CHAPTER_CAPACITY_RULE, checkChapterCapacity, PANELS_PER_BATCH } from './chapter-capacity.js';
 
 const router = Router();
+
+/** 2026-10-15：规划结果必须真的撑得起它自己声明的格数，否则打回重写。 */
+function validateChapterCapacity<T extends { chapters: Array<{ title: string; summary: string; pageCount: number }> }>(result: T): T {
+  for (const ch of result.chapters) {
+    const problem = checkChapterCapacity(ch.summary, ch.pageCount);
+    if (problem) throw new Error(problem);
+  }
+  return result;
+}
 
 // ========== Step 3: 章节拆分 ==========
 
@@ -20,8 +30,8 @@ const ChaptersSchema = {
         type: 'object',
         properties: {
           title: { type: 'string', description: '话标题：本话那件完整的事的极短概括（2-8 字）。禁止包含「章/卷/话/页」等结构字（序号由系统显示），例："报到""工位风波"' },
-          summary: { type: 'string', description: '本话剧情概要，2-3 句' },
-          pageCount: { type: 'integer', minimum: 1, maximum: 12, description: '本话内部批次数（每批固定 6 格）' },
+          summary: { type: 'string', description: '本话剧情概要。必须能拆出恰好 pageCount×6 个画面点（每点一句话），且要有戏剧张力、结尾留未解决的悬念' },
+          pageCount: { type: 'integer', minimum: 2, maximum: 3, description: `本话内部批次数（每批固定 ${PANELS_PER_BATCH} 格，即 12-18 格）` },
         },
         required: ['title', 'summary', 'pageCount'],
       },
@@ -88,7 +98,7 @@ router.post('/series/:id/arcs/:arcId/generate-chapters', async (req, res) => {
     const plotOutline = w.plotOutline ?? w.background;
     const conflicts = w.conflicts ?? [];
     const conflictsBlock = conflicts.length > 0 ? `\n核心矛盾：${conflicts.join('；')}` : '';
-    const prompt = `把季"${arc.title}"（${arc.premise}）拆分成话目。${priorBlock}\n\n剧情总纲：${plotOutline}${conflictsBlock}\n\n世界观：\n时代：${w.era}\n背景：${w.background}\n风格：${w.artStyle}\n\n故事简介：${series.logline}\n\n角色：${series.characters.map(c => `${c.name}（${c.role}）`).join('、')}\n\n本季计划话数：${arc.plannedChapterCount} 话。请按 arc premise 拆出 ${arc.plannedChapterCount} 话，每话一件完整的事（有起承转合），话标题禁止包含「章/卷/话/页」等结构字；每话 pageCount（内部批次数）2-6，之和 ≈ ${totalPages}（AI 自由决定，只要总数在这个范围）。${hint ? `\n\n用户修改意见：${hint}` : ''}`;
+    const prompt = `把季"${arc.title}"（${arc.premise}）拆分成话目。${priorBlock}\n\n剧情总纲：${plotOutline}${conflictsBlock}\n\n世界观：\n时代：${w.era}\n背景：${w.background}\n风格：${w.artStyle}\n\n故事简介：${series.logline}\n\n角色：${series.characters.map(c => `${c.name}（${c.role}）`).join('、')}\n\n本季计划话数：${arc.plannedChapterCount} 话。请按 arc premise 拆出 ${arc.plannedChapterCount} 话，每话一件完整的事（有起承转合），话标题禁止包含「章/卷/话/页」等结构字；每话 pageCount（内部批次数）2-3，之和 ≈ ${totalPages}（AI 自由决定，只要总数在这个范围）。${hint ? `\n\n用户修改意见：${hint}` : ''}${CHAPTER_CAPACITY_RULE}`;
     const result = await callStructuredJson<z.infer<typeof ChapterListZ>>(
       prompt,
       '你是一位漫画编剧。请输出严格的 JSON 格式。',
@@ -97,7 +107,7 @@ router.post('/series/:id/arcs/:arcId/generate-chapters', async (req, res) => {
         dnaKey,
         logKind: 'arc-chapters',
         logMeta: { seriesId: series.id, arcId: arc.id, targetPageCount: totalPages },
-        validate: raw => ChapterListZ.parse(raw),
+        validate: raw => validateChapterCapacity(ChapterListZ.parse(raw)),
       },
     );
     const chapters: Chapter[] = result.chapters.map(ch => ({
@@ -144,7 +154,7 @@ router.post('/series/:id/arcs/:arcId/append-next-chapter', async (req, res) => {
     const priorArcsBlock = priorArcs.length > 0
       ? `\n\n前季剧情：\n${priorArcs.map(a => `【${a.title}】\n${a.chapters.map(c => `- ${c.title}：${c.summary}`).join('\n')}`).join('\n\n')}\n`
       : '';
-    const prompt = `为连载「${series.title}」的 "${arc.title}"（${arc.premise}）续写下一话。${priorArcsBlock}${priorBlock}\n\n世界观：\n时代：${w.era}\n背景：${w.background}\n风格：${w.artStyle}\n\n故事简介：${series.logline}\n\n角色：${series.characters.map(c => `${c.name}（${c.role}）`).join('、')}\n\n请只输出一个 chapter（约 ${targetPages} 个内部批次，每批 6 格），summary 必须承接上一话结尾自然推进剧情。话标题禁止包含「章/卷/话/页」等结构字。${hint ? `\n\n用户修改意见：${hint}` : ''}`;
+    const prompt = `为连载「${series.title}」的 "${arc.title}"（${arc.premise}）续写下一话。${priorArcsBlock}${priorBlock}\n\n世界观：\n时代：${w.era}\n背景：${w.background}\n风格：${w.artStyle}\n\n故事简介：${series.logline}\n\n角色：${series.characters.map(c => `${c.name}（${c.role}）`).join('、')}\n\n请只输出一个 chapter（${targetPages} 个内部批次，每批 ${PANELS_PER_BATCH} 格），summary 必须承接上一话结尾自然推进剧情。话标题禁止包含「章/卷/话/页」等结构字。${hint ? `\n\n用户修改意见：${hint}` : ''}${CHAPTER_CAPACITY_RULE}`;
     const result = await callStructuredJson<{ chapter: { title: string; summary: string; pageCount: number } }>(
       prompt,
       '你是一位漫画编剧。请输出严格的 JSON 格式。',
@@ -156,7 +166,7 @@ router.post('/series/:id/arcs/:arcId/append-next-chapter', async (req, res) => {
             properties: {
               title: { type: 'string' },
               summary: { type: 'string' },
-              pageCount: { type: 'integer', minimum: 2, maximum: 8 },
+              pageCount: { type: 'integer', minimum: 2, maximum: 3 },
             },
             required: ['title', 'summary', 'pageCount'],
           },
@@ -168,7 +178,10 @@ router.post('/series/:id/arcs/:arcId/append-next-chapter', async (req, res) => {
         logKind: 'append-chapter',
         logMeta: { seriesId: series.id, arcId: arc.id, pageCount: targetPages },
         validate: raw => {
-          const v = z.object({ chapter: z.object({ title: z.string().min(1), summary: z.string().min(1), pageCount: z.number().int().min(2).max(8) }) }).parse(raw);
+          const v = z.object({ chapter: z.object({ title: z.string().min(1), summary: z.string().min(1), pageCount: z.number().int().min(2).max(3) }) }).parse(raw);
+          // 2026-10-15：summary 撑不起格数就打回，不能留一堆空批次。
+          const problem = checkChapterCapacity(v.chapter.summary, v.chapter.pageCount);
+          if (problem) throw new Error(problem);
           return v;
         },
       },
@@ -319,7 +332,7 @@ router.post('/series/:id/chapters/generate', async (req, res) => {
     const conflicts = series.worldview.conflicts ?? [];
     const outlineBlock = `\n\n剧情大纲（按此切话目，**禁止自己重新编剧情**，只做"分段 + 配批"）：\n${plotOutline}`;
     const conflictsBlock = conflicts.length > 0 ? `\n核心矛盾：${conflicts.join('；')}` : '';
-    const prompt = `基于以下漫画设定，把剧情大纲拆分成话目。${outlineBlock}${conflictsBlock}\n\n世界观：\n时代：${series.worldview.era}\n背景：${series.worldview.background}\n\n故事简介：${series.logline}\n\n角色：${series.characters.map(c => `${c.name}（${c.role}）`).join('、')}\n\n目标总规模：约 ${targetPageCount} 批（每批 6 格，每话约 2 批 ≈ 15 格）。请把剧情大纲对应切分成若干话（每话 2-6 批），话标题禁止包含「章/卷/话/页」等结构字；话标题与 summary 必须与剧情大纲的对应段保持一致；pageCount 之和 = ${targetPageCount}。`;
+    const prompt = `基于以下漫画设定，把剧情大纲拆分成话目。${outlineBlock}${conflictsBlock}\n\n世界观：\n时代：${series.worldview.era}\n背景：${series.worldview.background}\n\n故事简介：${series.logline}\n\n角色：${series.characters.map(c => `${c.name}（${c.role}）`).join('、')}\n\n目标总规模：约 ${targetPageCount} 批（每批 ${PANELS_PER_BATCH} 格，每话 2-3 批 = 12-18 格）。请把剧情大纲对应切分成若干话（每话 2-3 批），话标题禁止包含「章/卷/话/页」等结构字；话标题与 summary 必须与剧情大纲的对应段保持一致；pageCount 之和 = ${targetPageCount}。${CHAPTER_CAPACITY_RULE}`;
     const result = await callStructuredJson<z.infer<typeof ChapterListZ>>(
       prompt,
       '你是一位漫画编剧。请输出严格的 JSON 格式。',
@@ -328,7 +341,7 @@ router.post('/series/:id/chapters/generate', async (req, res) => {
         dnaKey,
         logKind: 'chapters',
         logMeta: { seriesId: series.id, targetPageCount },
-        validate: raw => ChapterListZ.parse(raw),
+        validate: raw => validateChapterCapacity(ChapterListZ.parse(raw)),
       },
     );
     const chapters: Chapter[] = result.chapters.map(ch => ({

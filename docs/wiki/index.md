@@ -1,7 +1,7 @@
 # Wiki Index
 
 > AI_comic 重构知识库。每页一行摘要。查任何模块前先读这里。
-> Last updated: 2026-10-15 | Total pages: 12
+> Last updated: 2026-10-16 | Total pages: 12
 
 ## Entities
 <!-- 模块页：拆分/重构过的模块 -->
@@ -21,10 +21,11 @@
 - [[orphan-image-gc]] — 443 张图（663MB）无人引用的根因：只认 series-data.json 为事实源、dry-run + 单次上限 500 的不可逆操作护栏
 - [[live-run-retro-2026-10-15]] — 合一闸上线后首次实跑抓出两个静默 bug：代码默认值 90s 被运行时配置 30s 盖住导致超时、对齐闸 schema 与模型实际输出不符 15 次全废；fail-open 如何把故障伪装成通过
 - [[review-thresholds-relaxed]] — 审核标准下调的决策依据：6 格里 4 格烧满 3 次重试但原图其实合格；review 70→78、对齐缺一→60% 呈现率、肢体 0.6→0.7、重试 3→2
+- [[chapter-drama-capacity]] — 一话=一天=一次发布，故 12-18 格不是体量指标而是「够不够演完一件事」；实测 4 话 summary 各约 100 字只够 5 拍却预留 18 格；pageCount 四处范围不一致导致该目标从未被强制
 
 ## Verification
 <!-- 验证记录 -->
 
-- 地基：`npm run check`（前后端 typecheck，strict）· `npm test`（87 个测试）· `npm run build`
+- 地基：`npm run check`（前后端 typecheck，strict）· `npm test`（117 个测试）· `npm run build`
 - 防复发静态检查：`server/series-routes/no-duplicate-routes.test.ts` —— 同 method+path 重复注册即失败（曾漏掉一次真实的静默丢字段事故）
 - fail-open 运行时实测：真实 Agnes provider 对坏图返 400，`runPanelGate` 捕获后四闸全 null 出图不阻塞

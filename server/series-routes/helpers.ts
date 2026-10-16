@@ -188,7 +188,10 @@ export const ChapterListZ = z.object({
   chapters: z.array(z.object({
     title: z.string().min(1),
     summary: z.string().default(''),
-    pageCount: z.number().int().min(1).max(12),
+    // 2026-10-15：统一为 2-3（12-18 格）。原先这里允许 1-12，
+    // 而 prompt 对模型说的是 2-6、append 端点说的是 2-8 —— 四处不一致，
+    // 结果「每话 12-18 格」这个目标在规划阶段**根本没被强制过**。
+    pageCount: z.number().int().min(2).max(3),
   })).min(1).max(8),
 });
 

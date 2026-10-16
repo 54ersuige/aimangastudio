@@ -445,6 +445,9 @@ export function SeriesWorkbench() {
             episodeCount={allChapters.length}
             onPrev={() => { if (currentEpisodeIndex > 0) pickEpisode(allChapters[currentEpisodeIndex - 1].id); }}
             onNext={() => { if (currentEpisodeIndex < allChapters.length - 1) pickEpisode(allChapters[currentEpisodeIndex + 1].id); }}
+            // 2026-10-16：本话拆完后的主操作。此前这个状态下按钮显示「续写本话」，
+            // 但它会跑去填下一话的第一批 —— 名实不符。现在显式跳到下一话。
+            onNextEpisode={() => { if (currentEpisodeIndex < allChapters.length - 1) pickEpisode(allChapters[currentEpisodeIndex + 1].id); }}
             busy={busy}
             taskProgress={taskProgress}
             onBreakdownBatch={async (pageId) => { await breakdownPageInCurrent(pageId); }}

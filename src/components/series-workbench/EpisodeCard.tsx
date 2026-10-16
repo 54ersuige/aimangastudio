@@ -11,8 +11,13 @@ import { Spinner, GeneratingPanelPlaceholder } from './ui';
  * - 每格可独立操作：生成/重掷此格、AI 改写此格、手改文字。
  * - 批次级操作（手动编辑 / 重拆 / 重画 / 整批改写）挂在批次分隔条上，作为高级修正入口。
  */
-function EpisodeCard(props: {
-  series: Series;
+/** 每批固定 6 格。与后端 chapter-capacity.ts 的 PANELS_PER_BATCH 对齐。 */
+const PANELS_PER_BATCH = 6;
+/** 每话目标格数区间（与后端一致）。 */
+const PANELS_PER_EPISODE_MIN = 12;
+const PANELS_PER_EPISODE_MAX = 18;
+
+function EpisodeCard(props: {  series: Series;
   chapter: Chapter;
   /** 全局话号（1 起，跨章连续） */
   episodeIndex: number;
@@ -33,8 +38,11 @@ function EpisodeCard(props: {
   onRewriteBatch: (pageId: string, instruction: string) => Promise<void>;
   onEditBatch: (page: SeriesPage) => void;
   // —— 话级 ——
-  onGenerateAllMissing: () => Promise<void>;
+    onGenerateAllMissing: () => Promise<void>;
   onContinue: () => Promise<void>;
+  /** 2026-10-16：本话已拆解完时，「进入下一话」。此前该状态下按钮仍是
+   *  「续写本话」，而它会去填**下一话**的第一批 —— 名实不符且用户无从察觉。 */
+  onNextEpisode: () => void;
   onPreview: () => void;
   // —— 格级 ——
   onGeneratePanel: (pageId: string, panelIndex: number) => Promise<void>;
@@ -49,7 +57,7 @@ function EpisodeCard(props: {
   const {
     series, chapter, episodeIndex, episodeCount, onPrev, onNext, busy, taskProgress,
     onBreakdownBatch, onGenerateBatch, onRegenerateBatch, onRewriteBatch, onEditBatch,
-    onGenerateAllMissing, onContinue, onPreview,
+    onGenerateAllMissing, onContinue, onNextEpisode, onPreview,
     onGeneratePanel, onRewritePanel, onUpdatePanelText, onUpdatePanelTextV2, onRewritePanelText,
   } = props;
 
@@ -100,9 +108,17 @@ function EpisodeCard(props: {
   const [panelBusy, setPanelBusy] = useState<{ pageId: string; index: number } | null>(null);
 
   const pagesSorted = [...chapter.pages].sort((a, b) => a.pageNumber - b.pageNumber);
-  const totalPanels = pagesSorted.reduce((n, p) => n + p.panels.length, 0);
+  /** 规划容量：规划时就定死的总格数（pageCount × 6），与填了多少无关。 */
+  const capacity = chapter.pageCount * PANELS_PER_BATCH;
+  /** 已拆解的格数（已填进分镜的）。 */
+  const filledPanels = pagesSorted.reduce((n, p) => n + p.panels.length, 0);
+  /** 已拆解的批次数。 */
+  const filledBatches = pagesSorted.filter(p => p.panels.length > 0).length;
+  const totalPanels = filledPanels;
   const doneCount = pagesSorted.reduce((n, p) => n + p.panels.filter(pn => !!pn.imageUrl).length, 0);
   const missing = totalPanels - doneCount;
+  /** 本话规划里还空着的批次数。 */
+  const emptyBatches = pagesSorted.length - filledBatches;
   const lastPage = pagesSorted[pagesSorted.length - 1];
 
   const handleGeneratePanel = async (pageId: string, index: number) => {
@@ -135,49 +151,85 @@ function EpisodeCard(props: {
         <p className="deck" style={{ marginBottom: '0.75rem' }}>{chapter.summary}</p>
       )}
 
-      {/* —— 进度 + 话规模目标 —— */}
+      {/* —— 进度：规划容量 vs 已拆解 vs 已出图，三者分开显示 —— */}
       <div className="kicker" style={{ marginBottom: '0.25rem' }}>
-        分镜 {totalPanels} 格（{pagesSorted.length} 批 × 6）· 已生成 {doneCount} 格{missing > 0 ? ` · 缺 ${missing} 格` : ''}
+        规划 {pagesSorted.length} 批 / {capacity} 格
+        <span style={{ margin: '0 0.4rem', opacity: 0.5 }}>·</span>
+        已拆解 {filledBatches} 批 / {filledPanels} 格
+        <span style={{ margin: '0 0.4rem', opacity: 0.5 }}>·</span>
+        已出图 {doneCount} 格{missing > 0 ? `（缺 ${missing} 格）` : ''}
       </div>
       {pagesSorted.length > 0 && (
-        <div style={{ fontSize: '0.6875rem', marginBottom: '0.75rem', color: totalPanels < 12 ? '#B0413E' : 'var(--ink-3)', lineHeight: 1.5 }}>
-          {totalPanels < 12
-            ? `本话规划 ${pagesSorted.length} 批（${totalPanels} 格），低于每话目标 12-18 格 —— 剧情没讲完就点「续写本话」追加一批（+6 格）。`
-            : totalPanels <= 18
-              ? `符合每话目标 12-18 格（公众号连载单话的常规体量）。`
-              : `已超每话目标 18 格，注意单话节奏；公众号单条长图过长会影响完读率。`}
+        <div style={{ fontSize: '0.6875rem', marginBottom: '0.75rem', color: 'var(--ink-3)', lineHeight: 1.5 }}>
+          {/*
+            2026-10-15 重写。
+            原文案是「本话规划 N 批（totalPanels 格），低于每话目标 12-18 格 —— 剧情没讲完就点续写」，
+            而 totalPanels 是**已填**格数，不是规划容量：
+            规划 18 格、填了 6 格时，它显示成「规划 3 批（6 格），低于目标，要续写」——
+            把「还没填」误报成「不够」，把用户往硬编内容的坑里推。
+            现在：容量/已填/出图分开，缺批次就是"还有几批没拆"，不再喊"剧情没讲完"。
+          */}
+          {emptyBatches > 0 ? (
+            <>本话规划 {capacity} 格，还有 <strong style={{ color: 'var(--accent)' }}>{emptyBatches} 批（{emptyBatches * PANELS_PER_BATCH} 格）没拆解</strong> —— 按计划拆完这一话就完整了。</>
+          ) : (
+            <>本话规划 {capacity} 格已全部拆解完成{capacity > PANELS_PER_EPISODE_MAX ? `（超出每话 ${PANELS_PER_EPISODE_MIN}-${PANELS_PER_EPISODE_MAX} 格目标，注意单条长图过长会影响完读率）` : `（每话目标 ${PANELS_PER_EPISODE_MIN}-${PANELS_PER_EPISODE_MAX} 格）`}。</>
+          )}
         </div>
       )}
 
       {/* —— 话级主操作 —— */}
+      {/*
+        2026-10-15 统一按钮语义。此前同一个后端动作在不同状态下叫三种名字：
+        「拆解分镜」/「续写本话」/「续写本话（追加一批）」，而"本话全满时"那个
+        还会偷偷去写下一话的第一批。现在按"本话还有几个空批次"给准确文案。
+      */}
       <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem', alignItems: 'center', flexWrap: 'wrap' }}>
-        {totalPanels === 0 ? (
+        {filledBatches === 0 ? (
           <button
             onClick={() => pagesSorted[0] && onBreakdownBatch(pagesSorted[0].id)}
             disabled={busy || pagesSorted.length === 0}
-            title={pagesSorted.length === 0 ? '本话还没有生成批次，请先在上方生成本话' : '为本话第一批拆解分镜（一次拆一批 6 格，保证前后文一致）'}
+            title={pagesSorted.length === 0 ? '本话还没有生成批次，请先在上方生成本话' : `拆解本话第 1 批（每批 ${PANELS_PER_BATCH} 格，保证前后文一致）`}
             className="btn btn--primary"
           >
-            {busy ? '拆解中…' : '① 拆解分镜（本批 6 格）▸'}
+            {busy ? '拆解中…' : `① 拆解第 1 批（${PANELS_PER_BATCH} 格）▸`}
           </button>
         ) : missing > 0 ? (
           <button onClick={onGenerateAllMissing} disabled={busy} className="btn btn--primary" title="逐批增量补齐缺图，已有图的格不会重画">
             {busy ? busyText('生成中') : `② 生成本话缺图（${missing} 格）▸`}
           </button>
-        ) : (
-          <button onClick={onContinue} disabled={busy} className="btn btn--primary" title="本话已规划批次全部完成；剧情需要继续时，基于已生成格 + 前文剧情追加一批（+6 格）">
-            {busy ? '续写中…' : '续写本话（追加一批 6 格）▸'}
-          </button>
-        )}
-        {totalPanels > 0 && missing > 0 && (
+        ) : emptyBatches > 0 ? (
           <button
             onClick={onContinue}
             disabled={busy}
-            title="本话剧情还没讲完、或格数低于 12-18 格目标时使用：基于已生成格 + 前文剧情追加一批（+6 格），不打断已有格"
+            className="btn btn--primary"
+            title={`按规划继续拆解本话下一批（还剩 ${emptyBatches} 批，共 ${emptyBatches * PANELS_PER_BATCH} 格没拆）`}
+          >
+            {busy ? '拆解中…' : `③ 拆解下一批（还剩 ${emptyBatches} 批）▸`}
+          </button>
+        ) : null}
+        {filledBatches > 0 && missing > 0 && emptyBatches > 0 && (
+          <button
+            onClick={onContinue}
+            disabled={busy}
+            title={`按规划继续拆解本话下一批（还剩 ${emptyBatches} 批），不打断已有格`}
             className="btn btn--ghost"
           >
-            续写本话（追加 6 格）
+            拆解下一批（还剩 {emptyBatches} 批）
           </button>
+        )}
+        {emptyBatches === 0 && filledBatches > 0 && (
+          <span className="kicker" style={{ fontSize: '0.6875rem', color: 'var(--ink-3)' }}>
+            本话 {capacity} 格已全部拆解 ·{' '}
+            <button
+              type="button"
+              onClick={onNextEpisode}
+              className="btn btn--link"
+              style={{ fontSize: '0.6875rem', padding: 0 }}
+              title="进入下一话"
+            >
+              进入下一话 ▸
+            </button>
+          </span>
         )}
         <span style={{ flex: 1 }} />
         <button onClick={onPreview} className="btn btn--ghost" style={{ color: 'var(--accent)' }}>公众号预览 ▸</button>

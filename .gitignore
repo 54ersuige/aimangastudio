@@ -46,6 +46,13 @@ tools/style-candidates/
 **/probe-*.png
 tools/_probe.png
 
+# 探针/调试用的 JSON 快照（2026-10-16）。
+# 这些是拿手边数据试脚本时随手落下的中间文件（如 {"shot":"sheet"} 这类入参、
+# 面板内容备份），不参与构建也没有任何代码读它们。
+# 刻意只忽略 tools/ 下的，避免误伤正常的 *.json 配置。
+tools/probe-*.json
+tools/*-restore.json
+
 # UI 截图（历史遗留，曾散落在根目录与 docs/screenshots/）。
 # 没有任何文档引用它们，且随界面改版早已过时 —— 属于过程产物不是资产。
 *.jpg
