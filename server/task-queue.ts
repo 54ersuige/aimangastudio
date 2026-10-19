@@ -106,6 +106,43 @@ export function setTaskProgress(taskId: string, progress: number): void {
   t.updatedAt = new Date().toISOString();
 }
 
+/**
+ * 心跳式进度（2026-10-16）。
+ *
+ * 问题：话目生成这类任务，一次模型调用就要 60~120 秒，而 `onProgress`
+ * 只在**每次尝试开始时**回调一次 —— 于是第一轮全程显示 0%。
+ * 「0% 停了 3 分钟」和「没反应」的观感几乎没区别，
+ * 用户正是因此以为卡死、去重启了服务，把正在跑的任务一起杀掉。
+ *
+ * 做法：在 [from, to) 区间内按时间线性爬升，永远不撞到 to。
+ * 真正完成/重写时由调用方显式 setTaskProgress 覆盖，不会被心跳拉回去。
+ *
+ * 关键：**必须能在任务结束时取消定时器**，否则会往已结束的 task 上空转。
+ */
+export function startTaskHeartbeat(
+  taskId: string,
+  from: number,
+  to: number,
+  durationMs: number,
+  intervalMs = 2000,
+): () => void {
+  const span = Math.max(1, to - from);
+  const start = Date.now();
+  const timer = setInterval(() => {
+    const t = tasks.get(taskId);
+    if (!t || t.status !== 'running') {
+      clearInterval(timer);
+      return;
+    }
+    const elapsed = Date.now() - start;
+    const ratio = Math.min(0.97, elapsed / durationMs);
+    setTaskProgress(taskId, from + span * ratio);
+  }, intervalMs);
+  // 不阻止进程退出（这里只是进度显示，业务任务另有生命周期）
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
 export function getTask(id: string): TaskState | undefined {
   cleanup();
   const t = tasks.get(id);
@@ -114,7 +151,6 @@ export function getTask(id: string): TaskState | undefined {
   const { key: _key, ...state } = t as TaskState & { key?: string };
   return state;
 }
-
 /** 调试：列出所有内存中的 task（不含内部 key）。仅本地使用。 */
 export function listTasks(): TaskState[] {
   cleanup();

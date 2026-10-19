@@ -11,7 +11,9 @@
  * 现在的实现：
  *   - 内存缓存：启动加载一次（含一次性迁移），之后读操作零磁盘 IO；
  *   - 原子写：先写 .tmp 再 rename，任何时刻崩溃都不会损坏旧库；
- *   - 防抖写盘：高频变更合并为 800ms 一次写盘，退出前（beforeExit/SIGINT/SIGTERM）兜底 flush；
+ *   - 防抖写盘：高频变更合并为 800ms 一次写盘，但**带 5000ms 最长上限**，
+ *     连续 busy 时强制落盘（2026-10-19 加，详见 save-scheduler.ts 的事故记录）；
+ *   - 备份：每次覆盖前把上一代复制成 .bak，启动时主库缺失/损坏自动从 .bak 恢复；
  *   - 图片落盘：加载时把所有 data URL 迁移为 /data/images/ 文件路径；
  *   - 路径基于模块真实位置（import.meta.url），与启动目录无关；
  *   - 全局页码：加载时规整为全系列连续编号；
@@ -20,11 +22,12 @@
  * 并发说明：Node 单线程内同步函数天然原子；写盘为同步调用不会交错。
  * 跨 await 的 read-modify-write 竞态由路由层用「页状态守卫 + 任务队列去重」防护。
  */
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, appendFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, appendFileSync, copyFileSync } from 'fs';
 import { resolve, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { randomUUID } from 'crypto';
 import { saveDataUrlImage, isDataUrl } from './image-store.js';
+import { createSaveScheduler } from './save-scheduler.js';
 import type {
   Series,
   SeriesCharacter,
@@ -52,10 +55,18 @@ function ensureDir(): void {
   mkdirSync(DATA_DIR, { recursive: true });
 }
 
-/** 原子写：临时文件 + rename，崩溃时要么旧库完整、要么新库完整。 */
+/** 原子写：临时文件 + rename，崩溃时要么旧库完整、要么新库完整。
+ *  覆盖前先把当前好库复制成 .bak —— 永远保留「上一代」，
+ *  配合 loadAll 的启动恢复，能兜住任何一次写坏/写丢。 */
 function atomicWrite(path: string, content: string): void {
   const tmp = `${path}.${randomUUID()}.tmp`;
   writeFileSync(tmp, content, 'utf-8');
+  try {
+    if (existsSync(path)) copyFileSync(path, `${path}.bak`);
+  } catch (e) {
+    // 备份失败不能挡住主写入，否则会从「丢数据」升级成「写不进去」
+    console.error('[series-store] 备份 .bak 失败（不影响本次写入）:', e);
+  }
   renameSync(tmp, path);
 }
 
@@ -219,6 +230,45 @@ function migrate(series: Series[]): boolean {
   return changed;
 }
 
+/**
+ * 启动恢复：主库缺失或 JSON 损坏时，从 atomicWrite 留下的 .bak 拉回上一代好数据。
+ *
+ * 只在这两种情况下介入 —— 主库能正常解析时绝不碰（哪怕它是空的，
+ * 那也可能是用户真的删光了，回滚反而制造「删不掉的东西」）。
+ * 能兜住「进程被硬杀 + 主库写坏」这一类事故，但兜不住「主库被写成了残缺但合法 JSON」——
+ * 那由 saveAll 的 maxWait 上限从源头堵（见 saveAll 注释里的事故记录）。
+ *
+ * path 参数化是为了能在测试里用临时目录验证，不去动用户的真实数据。
+ * @returns 是否发生了恢复，以及恢复回来的系列数。
+ */
+export function recoverFromBackup(path: string = DATA_PATH): { recovered: boolean; seriesCount: number } {
+  const bak = `${path}.bak`;
+  if (!existsSync(bak)) return { recovered: false, seriesCount: 0 };
+  let bakRaw: string;
+  let bakData: unknown;
+  try {
+    bakRaw = readFileSync(bak, 'utf-8');
+    bakData = JSON.parse(bakRaw);
+  } catch {
+    return { recovered: false, seriesCount: 0 }; // .bak 自己也坏了，没什么可救的，让上层报主库的问题
+  }
+  if (!Array.isArray(bakData)) return { recovered: false, seriesCount: 0 };
+
+  if (!existsSync(path)) {
+    console.warn(`[series-store] ⚠️ 主库缺失，已从 .bak 恢复 ${bakData.length} 个系列`);
+    writeFileSync(path, bakRaw, 'utf-8');
+    return { recovered: true, seriesCount: bakData.length };
+  }
+  try {
+    JSON.parse(readFileSync(path, 'utf-8'));
+  } catch {
+    console.warn(`[series-store] ⚠️ 主库已损坏，已从 .bak 恢复 ${bakData.length} 个系列`);
+    writeFileSync(path, bakRaw, 'utf-8');
+    return { recovered: true, seriesCount: bakData.length };
+  }
+  return { recovered: false, seriesCount: 0 };
+}
+
 function loadAll(): Series[] {
   if (cache) return cache;
   ensureDir();
@@ -227,6 +277,7 @@ function loadAll(): Series[] {
     console.log('[series-store] 迁移旧库 series-data.json → data/series-data.json');
     renameSync(LEGACY_PATH, DATA_PATH);
   }
+  recoverFromBackup();
   if (!existsSync(DATA_PATH)) {
     cache = [];
     return cache;
@@ -337,31 +388,39 @@ export function clearLegacyFlag(seriesId: string, characterId: string): boolean 
   return auditCharacter(c) === 'ok';
 }
 
-function saveAll(series: Series[]): void {
-  // 防抖持久化：高频变更（一次页面生成会触发多次 save）合并为一次写盘。
-  // 定时器到点后仍用同步原子写 —— 单线程内天然无交错，且保留 tmp+rename 崩溃安全。
-  // 代价：崩溃时最多丢失最后 SAVE_DEBOUNCE_MS 内的变更（读路径全部走内存缓存，不受影响）。
-  pendingSeries = series;
-  if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(flushSeriesStore, SAVE_DEBOUNCE_MS);
-  saveTimer.unref?.(); // 不阻止进程自然退出；退出前的兜底见下方信号处理
-}
-
 const SAVE_DEBOUNCE_MS = 800;
+/** 最长等待上限：距本轮首次挂起超过这个数就强制落盘。事故背景见 save-scheduler.ts。 */
+const SAVE_MAX_WAIT_MS = 5000;
 let pendingSeries: Series[] | null = null;
-let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** 立即把挂起的变更同步写盘（幂等）。 */
-export function flushSeriesStore(): void {
-  if (saveTimer) {
-    clearTimeout(saveTimer);
-    saveTimer = null;
-  }
+/** 真正把挂起变更写盘。幂等：无挂起变更时什么都不做。 */
+function flushPending(): void {
   if (!pendingSeries) return;
   const snapshot = pendingSeries;
   pendingSeries = null;
   ensureDir();
   atomicWrite(DATA_PATH, JSON.stringify(snapshot, null, 2));
+}
+
+/**
+ * 落盘调度器（带 maxWait 上限）——2026-10-19 加。
+ * 原来这里是纯尾部防抖，一次生成 5~8 分钟期间不断 save，定时器被无限推后、
+ * **全程没落过盘**；进程被 tsx watch 热重启杀掉时 beforeExit/SIGTERM 不执行，
+ * 整场生成归零（《加油啊》4 话就是这样没的）。详见 save-scheduler.ts 的事故记录。
+ */
+const saveScheduler = createSaveScheduler(flushPending, {
+  debounceMs: SAVE_DEBOUNCE_MS,
+  maxWaitMs: SAVE_MAX_WAIT_MS,
+});
+
+function saveAll(series: Series[]): void {
+  pendingSeries = series;
+  saveScheduler.schedule();
+}
+
+/** 立即把挂起的变更同步写盘（幂等）。 */
+export function flushSeriesStore(): void {
+  saveScheduler.flushNow();
 }
 
 // 进程退出兜底：防抖窗口内崩溃/被杀不丢数据

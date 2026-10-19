@@ -30,8 +30,38 @@ import type { Series, Chapter, Panel, SeriesPage } from '../series-store.js';
 import type { DnaKey } from '../../shared/types.js';
 import { isValidDnaKey as isValidDnaKeyStrict } from '../dna/registry.js';
 
-export function getTextProvider(config: { provider?: string }) {
-  switch (config.provider) {
+/**
+ * 判断一个传输层错误是否值得重试（2026-10-19）。
+ *
+ * 背景：话目生成一次模型调用要 200~400 秒，这种超长连接被网络层掐断
+ * 是常态（实测 `fetch failed`）。**用户已经等了 5 分钟**，
+ * 这时候直接失败等于把 5 分钟白扔 —— 必须重试。
+ *
+ * 但**配额 / 鉴权类错误重试毫无意义**：再等一次还是同样的 401/429，
+ * 只会让用户多等一个超时周期。
+ *
+ * 判断顺序刻意把「不可重试」放前面：这两类错误信息里常混着
+ * "fetch failed" 之类的连接描述，放后面就会被误判成可重试。
+ */
+export function isRetryableTransportError(msg: string): boolean {
+  const m = msg.toLowerCase();
+  // 先排除：配额耗尽、鉴权失败、参数错误 —— 重试只会再失败一次
+  if (/\b429\b|rate.?limit|quota|用量上限|积分不足|余额不足/.test(m)) return false;
+  if (/\b401\b|\b403\b|unauthorized|forbidden|invalid.?api.?key|认证|鉴权/.test(m)) return false;
+  if (/\b400\b|bad.?request|invalid.?parameter/.test(m)) return false;
+  // 再判定：这些是「换个时间点再来一次」有可能成功的
+  if (/fetch failed|econnreset|econnrefused|etimedout|enotfound|socket hang up/.test(m)) return true;
+  if (/请求超时|超时/.test(msg)) return true;         // abortableFetch 翻译过的中文文案
+  if (/\b5\d\d\b|internal server error|bad gateway|gateway timeout|service unavailable/.test(m)) return true;
+  return false;
+}
+
+/** 退避等待，避免网络抖动时立刻再撞一次。 */
+function sleepMs(ms: number): Promise<void> {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+export function getTextProvider(config: { provider?: string }) {  switch (config.provider) {
     case 'gemini': return gemini;
     case 'agnes': return agnes;
     case 'deepseek': return deepseek;
@@ -68,17 +98,22 @@ export async function callStructuredJson<T>(
     logKind?: string;
     logMeta?: Record<string, unknown>;
     /**
-     * 2026-10-16：重试进度回调。
-     *
-     * 为什么加这个：生成话目实测要转 **8 分钟**（16:13 点 → 16:21 出结果，
-     * 中间还有一次字数不够的整轮重写）。而按钮只有一句「生成中…」，
-     * 8 分钟不动和卡死长得一模一样 —— 用户据此以为没反应，又连点了两次，
-     * 后两次反而撞上 409「该季已有 chapter」，于是彻底乱套。
-     *
-     * 推理型模型一话要 60~120 秒（84% 是思考 token），批量出几话就是好几分钟。
-     * 这个时长**必须有进度可看**，否则每次都会重演。
+     * 进度回调（attempt / total / 阶段文案）。
+     * 2026-10-16：生成话目实测一次尝试就要 60~120 秒
+     * （推理模型 84% 输出是思考 token），只在尝试开始时回调一次的话
+     * 进度条会死守 0% 三分钟 —— 和「没反应」没区别。
      */
     onProgress?: (attempt: number, total: number, phase: string) => void;
+    /**
+     * 心跳期间的进度区间终点（0-100）。给定时器一个可爬升的上限。
+     * 不传则不做心跳（短任务不需要）。
+     */
+    heartbeat?: { from: number; to: number; durationMs: number };
+    /**
+     * 启动心跳。由调用方实现（需要把 heartbeat 区间翻译成 taskId 上的 setTaskProgress）。
+     * 返回停止函数；返回 null/undefined 表示不启用心跳。
+     */
+    onHeartbeatStart?: (h: { from: number; to: number; durationMs: number }) => (() => void) | null;
     /**
      * 覆盖本次调用的超时（毫秒）。
      *
@@ -107,9 +142,17 @@ export async function callStructuredJson<T>(
   const attemptConfig = { ...config, timeout: perAttemptMs };
   const provider = getTextProvider(attemptConfig);
   let lastError: string | undefined;
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+  // 心跳定时器必须在每次尝试开始前先停掉旧的，否则会叠加空转。
+  let stopHeartbeat: (() => void) | null = null;
+  const stopHb = () => { stopHeartbeat?.(); stopHeartbeat = null; };
+  try {
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     const isRetry = attempt > 0;
     opts.onProgress?.(attempt, MAX_RETRIES, isRetry ? '内容不够，正在重写' : '正在构思');
+    if (opts.heartbeat) {
+      stopHb();
+      stopHeartbeat = opts.onHeartbeatStart?.(opts.heartbeat) ?? null;
+    }
     const attemptSystem = isRetry
       ? `${systemInstruction}\n\n⚠️ 上一次输出未通过 JSON 校验（${lastError ?? ''}）。请重新输出严格符合 schema 的 JSON object，不要任何额外文字、不要 markdown 代码块。`
       : systemInstruction;
@@ -128,7 +171,28 @@ export async function callStructuredJson<T>(
       attempt,
       ...opts.logMeta,
     });
-    const result = await provider.generateText(attemptConfig, req);
+    let result;
+    try {
+      result = await provider.generateText(attemptConfig, req);
+    } catch (e: any) {
+      stopHb();
+      // 2026-10-19 实测：一次 200+ 秒的长连接会被网络层掐断（fetch failed）。
+      // 这种「等了 5 分钟然后失败」必须重试，而不是把 5 分钟白扔给用户。
+      // 但**配额/鉴权类错误重试无意义**，重试只是再等一次。
+      const msg = String(e?.message || e || '');
+      if (isRetryableTransportError(msg) && attempt < MAX_RETRIES - 1) {
+        lastError = msg.slice(0, 200);
+        console.warn(
+          `[series-routes] ${opts.logKind} attempt ${attempt} 传输层失败（${msg.slice(0, 80)}），将重试`,
+        );
+        await sleepMs(1200);
+        continue;
+      }
+      throw e;
+    } finally {
+      // 这一次尝试结束了（成功、失败还是抛错），心跳都必须停。
+      stopHb();
+    }
     // 记录原始响应到审计日志（排查 zod 失败最关键的信息）。
     logGeneration((opts.logKind || 'structured-text') + '-response', {
       model: config.model,
@@ -154,6 +218,10 @@ export async function callStructuredJson<T>(
       console.warn(`[series-routes] ${opts.logKind} attempt ${attempt} zod 校验失败，将重试：${(lastError ?? '').slice(0, 200)}`);
       continue;
     }
+    }
+  } finally {
+    // 兜底：任何 return / throw 路径都不留下悬挂定时器
+    stopHb();
   }
   throw new Error(`模型输出多次未通过校验（最后一次：${lastError ?? '未知错误'}）。请稍后重试。`);
 }

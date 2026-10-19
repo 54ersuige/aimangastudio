@@ -5,7 +5,7 @@ import { getSeries, updateSeries, appendChaptersToArc, setChapters, updateChapte
 import type { Chapter, Arc } from '../series-store.js';
 import { callStructuredJson, seriesDnaKey, ChapterListZ } from './helpers.js';
 import { CHAPTER_CAPACITY_RULE, checkChapterCapacity, checkChapterDensity, PANELS_PER_BATCH, BATCHES_PER_EPISODE_MIN, BATCHES_PER_EPISODE_MAX, PANELS_PER_EPISODE_MIN, PANELS_PER_EPISODE_MAX, feasibleTotalBatches } from './chapter-capacity.js';
-import { runTask, setTaskProgress, DuplicateTaskError } from '../task-queue.js';
+import { runTask, setTaskProgress, startTaskHeartbeat, DuplicateTaskError } from '../task-queue.js';
 
 const router = Router();
 
@@ -120,12 +120,17 @@ router.post('/series/:id/arcs/:arcId/generate-chapters', async (req, res) => {
           // 2026-10-16：实测 4 话要 5~8 分钟，text 默认超时 240s 会中途掐断。
           timeoutMs: 480000,
           validate: raw => validateChapterCapacity(ChapterListZ.parse(raw)),
-          // 0-49% 留给第 1 次尝试，50-99% 留给重写，让进度条真的在动。
+          // 0-49% 给首轮，50-99% 给重写，让进度条真的在动。
           onProgress: (attempt, total, phase) => {
             const base = attempt / total;
             setTaskProgress(tid, Math.round(base * 100));
             console.log(`[arc-chapters] progress ${Math.round(base * 100)}% (${phase})`);
           },
+          // 2026-10-16：一次尝试就要 60~120 秒，只在尝试开始时报一次的话
+          // 进度条会死守 0% 三分钟 —— 观感和「没反应」没区别。
+          // 按区间线性爬升且不撞终点（真正完成时由外层显式覆盖）。
+          heartbeat: { from: 0, to: 49, durationMs: 200000 },
+          onHeartbeatStart: (h) => startTaskHeartbeat(tid, h.from, h.to, h.durationMs),
         },
       );
       setTaskProgress(tid, 99);
@@ -215,6 +220,8 @@ router.post('/series/:id/arcs/:arcId/append-next-chapter', async (req, res) => {
             setTaskProgress(tid, Math.round((attempt / total) * 100));
             console.log(`[append-chapter] progress ${Math.round((attempt / total) * 100)}% (${phase})`);
           },
+          heartbeat: { from: 0, to: 49, durationMs: 150000 },
+          onHeartbeatStart: (h) => startTaskHeartbeat(tid, h.from, h.to, h.durationMs),
           validate: raw => {
             const v = z.object({ chapter: z.object({ title: z.string().min(1), summary: z.string().min(1), pageCount: z.number().int().min(BATCHES_PER_EPISODE_MIN).max(BATCHES_PER_EPISODE_MAX) }) }).parse(raw);
             // 2026-10-15：summary 撑不起格数就打回，不能留一堆空批次。
@@ -354,6 +361,8 @@ ${hint ? `\n用户修改意见：${hint}` : ''}`;
             setTaskProgress(tid, Math.round((attempt / total) * 100));
             console.log(`[replan-chapter] progress ${Math.round((attempt / total) * 100)}% (${phase})`);
           },
+          heartbeat: { from: 0, to: 49, durationMs: 150000 },
+          onHeartbeatStart: (h) => startTaskHeartbeat(tid, h.from, h.to, h.durationMs),
           validate: raw => {
             const v = z.object({ chapter: z.object({
               title: z.string().min(1),
