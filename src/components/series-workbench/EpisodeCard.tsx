@@ -275,10 +275,11 @@ function EpisodeCard(props: {  series: Series;
         </div>
       )}
 
-      {/* 2026-10-20：提示（不是错误）—— 比如"这格描述太短，建议你补充"。
-          系统不再替用户改写分镜，改由用户自己决定要不要动稿。 */}
+      {/* 2026-10-20：审核提示（不是错误，也不是待办）。
+          分镜是 AI 拆的、补全是流程的一部分，用户只做审核 ——
+          所以这里只说"这一格多看一眼"，绝不能说"请你补充"。 */}
       {chapter.pages.some(p => p.hint) && (
-        <div style={{ padding: '0.5rem 0.75rem', background: 'var(--bg-soft)', color: 'var(--ink-2)', fontSize: '0.8125rem', marginBottom: '1rem', borderLeft: '3px solid var(--accent)' }}>
+        <div style={{ padding: '0.5rem 0.75rem', background: 'var(--bg-soft)', color: 'var(--ink-2)', fontSize: '0.8125rem', marginBottom: '1rem', borderLeft: '2px solid var(--rule-soft)' }}>
           {chapter.pages.filter(p => p.hint).map(p => p.hint).join('；')}
         </div>
       )}
