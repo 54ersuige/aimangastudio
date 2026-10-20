@@ -41,6 +41,17 @@ export interface AuditRecord {
     ok: boolean;
     items: string[];
     missing: string[];
+    /** 只含"大问题"的缺失项 —— 只有这些会触发重画（2026-10-20）。 */
+    criticalMissing?: string[];
+    reason: string;
+    confidence: number;
+  } | null;
+  /**
+   * 画面内可读文字检查（2026-10-20 新增第五道闸）。
+   * hasReadableText=true = 画面里出现了可读文字或伪汉字乱码（失败品）。
+   */
+  textInImage?: {
+    hasReadableText: boolean;
     reason: string;
     confidence: number;
   } | null;
@@ -320,6 +331,11 @@ export function AuditCard({ seriesId }: Props) {
                       {r.alignmentAudit && !r.alignmentAudit.ok && (
                         <div style={{ color: '#d97706', fontSize: '0.75rem' }}>
                           🎯 图文对齐：{r.alignmentAudit.reason}
+                        </div>
+                      )}
+                      {r.textInImage?.hasReadableText && (
+                        <div style={{ color: '#d97706', fontSize: '0.75rem' }}>
+                          🔤 画面内有文字：{r.textInImage.reason}
                         </div>
                       )}
                     </>

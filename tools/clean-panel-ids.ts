@@ -32,7 +32,7 @@ async function main() {
   const charMap = new Map(series.characters.map(c => [c.id, c]));
 
   let idFixed = 0;
-  const genderIssues: Array<{ arc: number; chapter: string; page: number; panel: number; desc: string; kind: string; name: string; want: string }> = [];
+  const genderIssues: Array<{ arc: number; chapter: string; page: string; panel: number; desc: string; kind: string; name: string; want: string }> = [];
 
   for (const arc of series.arcs) {
     for (const ch of arc.chapters) {
