@@ -24,6 +24,8 @@ import {
   feasibleTotalBatches,
   checkChapterDensity,
   DENSITY_WARN_RATIO,
+  fitPageCount,
+  CAPACITY_TOLERANCE,
 } from './chapter-capacity.js';
 
 describe('容量换算', () => {
@@ -82,14 +84,68 @@ describe('checkChapterCapacity —— 返工指令必须具体到可执行', () 
     expect(problem).toContain('360');
   });
 
-  it('返工指令必须同时提戏剧张力与"结尾别收干净"', () => {
+  it('返工指令只讲容量，不再夹带张力要求（2026-10-20）', () => {
     const problem = checkChapterCapacity('一'.repeat(50), 2)!;
-    expect(problem).toContain('冲突');
-    expect(problem).toContain('未解决');
+    // 硬校验的返工指令会被**原样回喂给模型**。把「张力」塞进来，
+    // 模型会为了满足它继续加字 → 反而更容易撞上密度上限。
+    // 张力是软要求，它待在 CHAPTER_CAPACITY_RULE 里就够了。
+    expect(problem).not.toContain('冲突');
+    expect(problem).not.toContain('未解决');
+    expect(problem).not.toContain('张力');
   });
 
   it('pageCount=2 也一样拦（不能只拦 3）', () => {
     expect(checkChapterCapacity('一'.repeat(104), 2)).not.toBeNull();
+  });
+});
+
+describe('checkChapterCapacity —— 10% 容差（2026-10-20）', () => {
+  // 病根现场：pageCount=3，summary 写了 353 字，门槛 360 字 —— 差 7 个字。
+  // 7 个字是"半句话"的量，却让整季 5~8 分钟的生成全部作废。
+  it('实测的 353 字现在通过（差 7 个字不再整季作废）', () => {
+    expect(estimatedPanels('一'.repeat(353))).toBe(17); // 353/20 = 17 拍
+    expect(checkChapterCapacity('一'.repeat(353), 3)).toBeNull();
+  });
+
+  it('容差边界：18 格允许少 2 格（16 拍）', () => {
+    // allowedMiss = ceil(18 × 0.1) = 2 → need(18) - 2 = 16
+    expect(checkChapterCapacity('一'.repeat(320), 3)).toBeNull();   // 16 拍
+    expect(checkChapterCapacity('一'.repeat(319), 3)).not.toBeNull(); // 15 拍
+  });
+
+  it('缺得太多仍然拦（容差不是放水）', () => {
+    expect(checkChapterCapacity('一'.repeat(300), 3)).not.toBeNull(); // 15 拍，缺 3 格
+    expect(checkChapterCapacity('一'.repeat(104), 3)).not.toBeNull(); // 病根现场仍拦
+  });
+
+  it('pageCount=2 的容差是 2 格（12-2=10 拍）', () => {
+    expect(checkChapterCapacity('一'.repeat(200), 2)).toBeNull();   // 10 拍
+    expect(checkChapterCapacity('一'.repeat(199), 2)).not.toBeNull(); // 9 拍
+  });
+});
+
+describe('fitPageCount —— 容量不足就降格数，不作废重做（2026-10-20）', () => {
+  // 换模型后实测：写 240~310 字的模型每话都要重试，
+  // 但这些长度撑 2 批（12 格）绰绰有余 —— 该调整的是格数，不是内容。
+  it('303 字撑不起 3 批 → 降为 2 批', () => {
+    expect(fitPageCount('一'.repeat(303), 3)).toBe(2);
+  });
+
+  it('239 字也够 2 批（容差 10%）→ 降为 2 批', () => {
+    expect(fitPageCount('一'.repeat(239), 3)).toBe(2);
+  });
+
+  it('写得够长就保持原档位', () => {
+    expect(fitPageCount('一'.repeat(520), 3)).toBe(3);
+  });
+
+  it('连最低档都撑不住 → null（该让模型重写）', () => {
+    // 2 批 = 12 格，容差允许少 2 拍 → 至少要 10 拍 = 200 字
+    expect(fitPageCount('一'.repeat(150), 3)).toBeNull();
+  });
+
+  it('永远不会降到 1 批以下（产品承诺是 12-18 格）', () => {
+    expect(fitPageCount('一'.repeat(150), 2)).toBeNull();
   });
 });
 

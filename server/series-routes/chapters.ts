@@ -4,7 +4,7 @@ import { sendError } from '../utils.js';
 import { getSeries, updateSeries, appendChaptersToArc, setChapters, updateChapter, moveChapter, removeChapter } from '../series-store.js';
 import type { Chapter, Arc } from '../series-store.js';
 import { callStructuredJson, seriesDnaKey, ChapterListZ } from './helpers.js';
-import { CHAPTER_CAPACITY_RULE, checkChapterCapacity, checkChapterDensity, PANELS_PER_BATCH, BATCHES_PER_EPISODE_MIN, BATCHES_PER_EPISODE_MAX, PANELS_PER_EPISODE_MIN, PANELS_PER_EPISODE_MAX, feasibleTotalBatches } from './chapter-capacity.js';
+import { CHAPTER_CAPACITY_RULE, checkChapterCapacity, checkChapterDensity, fitPageCount, PANELS_PER_BATCH, BATCHES_PER_EPISODE_MIN, BATCHES_PER_EPISODE_MAX, PANELS_PER_EPISODE_MIN, PANELS_PER_EPISODE_MAX, feasibleTotalBatches } from './chapter-capacity.js';
 import { runTask, setTaskProgress, startTaskHeartbeat, DuplicateTaskError } from '../task-queue.js';
 
 const router = Router();
@@ -39,6 +39,55 @@ const ChaptersSchema = {
     },
   },
   required: ['chapters'],
+} as const;
+
+/**
+ * 季骨架 schema（2026-10-20）。
+ *
+ * 「生成本季话目」拆成两步后的第 1 步产物：只出**标题 + 批次 + 一句话梗概**，
+ * 不出 summary。输出量小（~200 字），调用几十秒就够 ——
+ * 目的是先把「这一季分几话、每话讲什么事」定下来，让后面逐话生成有据可依。
+ */
+const ArcOutlineSchema = {
+  type: 'object',
+  properties: {
+    chapters: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 8,
+      items: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: '话标题：本话那件完整的事的极短概括（2-8 字）。禁止包含「章/卷/话/页」等结构字，例："报到""工位风波"' },
+          pageCount: { type: 'integer', minimum: BATCHES_PER_EPISODE_MIN, maximum: BATCHES_PER_EPISODE_MAX, description: `本话内部批次数（每批固定 ${PANELS_PER_BATCH} 格，即 ${PANELS_PER_EPISODE_MIN}-${PANELS_PER_EPISODE_MAX} 格）` },
+          gist: { type: 'string', description: '本话要讲的那件事，一句话（20-40 字）。话与话之间不能是同一件事' },
+        },
+        required: ['title', 'pageCount', 'gist'],
+      },
+    },
+  },
+  required: ['chapters'],
+} as const;
+
+/**
+ * 单话正文 schema（2026-10-20）。
+ * 与「扩写下一话」用的是同一套结构 —— 逐话生成就该复用同一条路径，
+ * 而不是再发明一种格式。
+ */
+const ChapterDetailSchema = {
+  type: 'object',
+  properties: {
+    chapter: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: '话标题：2-8 字。禁止包含「章/卷/话/页」等结构字' },
+        summary: { type: 'string', description: `本话剧情概要。必须能拆出恰好 pageCount×${PANELS_PER_BATCH} 个画面点（每点一句话），且要有戏剧张力、结尾留未解决的悬念` },
+        pageCount: { type: 'integer', minimum: BATCHES_PER_EPISODE_MIN, maximum: BATCHES_PER_EPISODE_MAX, description: `本话内部批次数（每批固定 ${PANELS_PER_BATCH} 格，即 ${PANELS_PER_EPISODE_MIN}-${PANELS_PER_EPISODE_MAX} 格）` },
+      },
+      required: ['title', 'summary', 'pageCount'],
+    },
+  },
+  required: ['chapter'],
 } as const;
 
 // ========== 季/卷 蓝图 ==========
@@ -108,33 +157,107 @@ router.post('/series/:id/arcs/:arcId/generate-chapters', async (req, res) => {
       const plotOutline = w.plotOutline ?? w.background;
       const conflicts = w.conflicts ?? [];
       const conflictsBlock = conflicts.length > 0 ? `\n核心矛盾：${conflicts.join('；')}` : '';
-      const prompt = `把季"${arc.title}"（${arc.premise}）拆分成话目。${priorBlock}\n\n剧情总纲：${plotOutline}${conflictsBlock}\n\n世界观：\n时代：${w.era}\n背景：${w.background}\n风格：${w.artStyle}\n\n故事简介：${series.logline}\n\n角色：${series.characters.map(c => `${c.name}（${c.role}）`).join('、')}\n\n本季计划话数：${arc.plannedChapterCount} 话。请按 arc premise 拆出 ${arc.plannedChapterCount} 话，每话一件完整的事（有起承转合），话标题禁止包含「章/卷/话/页」等结构字；每话 pageCount（内部批次数）2-3，之和 ≈ ${totalPages}（AI 自由决定，只要总数在这个范围）。${hint ? `\n\n用户修改意见：${hint}` : ''}${CHAPTER_CAPACITY_RULE}`;
-      const result = await callStructuredJson<z.infer<typeof ChapterListZ>>(
-        prompt,
+      const worldBlock = `\n\n世界观：\n时代：${w.era}\n背景：${w.background}\n风格：${w.artStyle}\n\n故事简介：${series.logline}\n\n角色：${series.characters.map(c => `${c.name}（${c.role}）`).join('、')}`;
+
+      // ============================================================
+      // 2026-10-20：整季一次性生成 → 骨架 + 逐话生成
+      // ============================================================
+      //
+      // 旧做法：一次模型调用出完整季（4 话 × 360+ 字 = 1440+ 字 JSON）。
+      // 代价是**一荣俱荣**：任何一话不过容量校验 → 整季作废重来，
+      // 而这一次调用本身就要 5~8 分钟（推理型模型）——
+      // 用户等的是 N 倍的赌注，输一次全没。
+      //
+      // 实测翻车现场（2026-10-19）：4 话里第 3 话 summary 写了 353 字、
+      // 门槛 360 字，差 7 个字 → 整季重来 → 又遇 529 过载 → 全盘失败。
+      //
+      // 新做法拆成两步：
+      //   1. 骨架：一次轻量调用，只出 N 话的「标题 + 批次 + 一句话梗概」。
+      //      输出量小（~200 字），30~60 秒就够。
+      //   2. 正文：逐话各调一次，每次只写 1 话的 summary。
+      //      输出量 ÷N，**失败只重做那一话**，前面的成果不受牵连。
+      //
+      // 代价是多一次调用；换来的是「失败不隔离」这个最大痛点被拆掉。
+      const outlinePrompt = `为连载「${series.title}」的季 "${arc.title}"（${arc.premise}）规划 ${arc.plannedChapterCount} 话的骨架。${priorBlock}\n\n剧情总纲：${plotOutline}${conflictsBlock}${worldBlock}\n\n本季计划话数：${arc.plannedChapterCount} 话。请拆成 ${arc.plannedChapterCount} 话，每话一件完整的事（有起承转合），话与话之间剧情要推进、不能重复同一件事。话标题禁止包含「章/卷/话/页」等结构字；每话 pageCount（内部批次数）${BATCHES_PER_EPISODE_MIN}-${BATCHES_PER_EPISODE_MAX}，之和 ≈ ${totalPages}。每话给一句 gist（本话要讲的那件事，20-40 字）。${hint ? `\n\n用户修改意见：${hint}` : ''}`;
+      const outline = await callStructuredJson<{ chapters: Array<{ title: string; pageCount: number; gist: string }> }>(
+        outlinePrompt,
         '你是一位漫画编剧。请输出严格的 JSON 格式。',
-        ChaptersSchema as Record<string, unknown>,
+        ArcOutlineSchema as Record<string, unknown>,
         {
           dnaKey,
-          logKind: 'arc-chapters',
+          logKind: 'arc-outline',
           logMeta: { seriesId: series.id, arcId: arc.id, targetPageCount: totalPages },
-          // 2026-10-16：实测 4 话要 5~8 分钟，text 默认超时 240s 会中途掐断。
-          timeoutMs: 480000,
-          validate: raw => validateChapterCapacity(ChapterListZ.parse(raw)),
-          // 0-49% 给首轮，50-99% 给重写，让进度条真的在动。
-          onProgress: (attempt, total, phase) => {
-            const base = attempt / total;
-            setTaskProgress(tid, Math.round(base * 100));
-            console.log(`[arc-chapters] progress ${Math.round(base * 100)}% (${phase})`);
-          },
-          // 2026-10-16：一次尝试就要 60~120 秒，只在尝试开始时报一次的话
-          // 进度条会死守 0% 三分钟 —— 观感和「没反应」没区别。
-          // 按区间线性爬升且不撞终点（真正完成时由外层显式覆盖）。
-          heartbeat: { from: 0, to: 49, durationMs: 200000 },
+          // 骨架输出很小，3 分钟绰绰有余（旧的 480s 是为整季一次性生成设的）
+          timeoutMs: 180000,
+          onProgress: () => setTaskProgress(tid, 5),
+          heartbeat: { from: 0, to: 9, durationMs: 60000 },
           onHeartbeatStart: (h) => startTaskHeartbeat(tid, h.from, h.to, h.durationMs),
         },
       );
+      const plannedChapters = outline.chapters ?? [];
+      if (plannedChapters.length === 0) throw new Error('季骨架为空，未能生成任何话目');
+      setTaskProgress(tid, 10);
+
+      // —— 第 2 步：逐话生成正文 ——
+      const N = plannedChapters.length;
+      const bodyStart = 10;
+      const bodyEnd = 99;
+      const step = (bodyEnd - bodyStart) / N;
+      const written: Array<{ title: string; summary: string; pageCount: number }> = [];
+
+      for (let i = 0; i < N; i++) {
+        const planned = plannedChapters[i];
+        const base = bodyStart + step * i;
+        // 已写完的话 → 让这一话承接上一话结尾（连贯性）
+        const writtenBlock = written.length > 0
+          ? `\n\n本季已写完的话（承接它们的结尾继续推进，不要重复）：\n${written.map((c, ci) => `- 第 ${ci + 1} 话《${c.title}》：${c.summary}`).join('\n')}\n`
+          : '';
+        // 全部话的计划 → 让这一话知道自己该讲哪件、不越界
+        const planList = plannedChapters.map((p, pi) => `${pi + 1}. ${p.title} —— ${p.gist}`).join('\n');
+        const detailPrompt = `为连载「${series.title}」的季 "${arc.title}"（${arc.premise}）写第 ${i + 1} 话（共 ${N} 话）。${priorBlock}${writtenBlock}\n\n本季各话规划（你只写第 ${i + 1} 话，别的不要写）：\n${planList}\n\n剧情总纲：${plotOutline}${conflictsBlock}${worldBlock}\n\n本话要做的事：${planned.gist}\n\n请只输出第 ${i + 1} 话的 chapter。话标题禁止包含「章/卷/话/页」等结构字。${CHAPTER_CAPACITY_RULE}`;
+        const one = await callStructuredJson<{ chapter: { title: string; summary: string; pageCount: number } }>(
+          detailPrompt,
+          '你是一位漫画编剧。请输出严格的 JSON 格式。',
+          ChapterDetailSchema as Record<string, unknown>,
+          {
+            dnaKey,
+            logKind: 'arc-chapter-body',
+            logMeta: { seriesId: series.id, arcId: arc.id, chapterIndex: i + 1 },
+            // 单话 —— 与「扩写下一话」同量级，5 分钟够
+            timeoutMs: 300000,
+            validate: raw => {
+              const v = z.object({ chapter: z.object({ title: z.string().min(1), summary: z.string().min(1), pageCount: z.number().int().min(BATCHES_PER_EPISODE_MIN).max(BATCHES_PER_EPISODE_MAX) }) }).parse(raw);
+              // 2026-10-20：容量不足时**自动降到写得起的档位**（3 批 → 2 批），
+              // 而不是作废重做。换模型后实测：写得短的模型每话都要重试，
+              // 但它写出的长度撑 12 格完全够 —— 该调整的是格数，不是内容。
+              const fitted = fitPageCount(v.chapter.summary, v.chapter.pageCount);
+              if (fitted === null) {
+                // 连 2 批都撑不住 → 真的写太少，让模型重写
+                throw new Error(checkChapterCapacity(v.chapter.summary, BATCHES_PER_EPISODE_MIN)!);
+              }
+              if (fitted !== v.chapter.pageCount) {
+                console.log(
+                  `[arc-chapters] summary ${v.chapter.summary.length} 字撑不起 ${v.chapter.pageCount} 批，`
+                  + `自动降为 ${fitted} 批（${fitted * PANELS_PER_BATCH} 格）`,
+                );
+                v.chapter.pageCount = fitted;
+              }
+              return v;
+            },
+            onProgress: (attempt, total) => {
+              setTaskProgress(tid, Math.round(base + (attempt / total) * step));
+            },
+            // 单话一次尝试就要 60~120 秒，只在开始时报一次的话进度条会死守不动
+            heartbeat: { from: base, to: base + step * 0.9, durationMs: 150000 },
+            onHeartbeatStart: (h) => startTaskHeartbeat(tid, h.from, h.to, h.durationMs),
+          },
+        );
+        written.push(one.chapter);
+        setTaskProgress(tid, Math.round(base + step));
+        console.log(`[arc-chapters] 第 ${i + 1}/${N} 话完成`);
+      }
       setTaskProgress(tid, 99);
-      const chapters: Chapter[] = result.chapters.map(ch => ({
+      const chapters: Chapter[] = written.map(ch => ({
         id: crypto.randomUUID(),
         arcId: arc.id,
         title: ch.title,
@@ -224,9 +347,18 @@ router.post('/series/:id/arcs/:arcId/append-next-chapter', async (req, res) => {
           onHeartbeatStart: (h) => startTaskHeartbeat(tid, h.from, h.to, h.durationMs),
           validate: raw => {
             const v = z.object({ chapter: z.object({ title: z.string().min(1), summary: z.string().min(1), pageCount: z.number().int().min(BATCHES_PER_EPISODE_MIN).max(BATCHES_PER_EPISODE_MAX) }) }).parse(raw);
-            // 2026-10-15：summary 撑不起格数就打回，不能留一堆空批次。
-            const problem = checkChapterCapacity(v.chapter.summary, v.chapter.pageCount);
-            if (problem) throw new Error(problem);
+            // 2026-10-20：容量不足时自动降到写得起的档位（见 fitPageCount 注释）
+            const fitted = fitPageCount(v.chapter.summary, v.chapter.pageCount);
+            if (fitted === null) {
+              throw new Error(checkChapterCapacity(v.chapter.summary, BATCHES_PER_EPISODE_MIN)!);
+            }
+            if (fitted !== v.chapter.pageCount) {
+              console.log(
+                `[append-chapter] summary ${v.chapter.summary.length} 字撑不起 ${v.chapter.pageCount} 批，`
+                + `自动降为 ${fitted} 批（${fitted * PANELS_PER_BATCH} 格）`,
+              );
+              v.chapter.pageCount = fitted;
+            }
             return v;
           },
         },

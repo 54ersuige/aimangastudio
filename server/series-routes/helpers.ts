@@ -49,6 +49,17 @@ export function isRetryableTransportError(msg: string): boolean {
   if (/\b429\b|rate.?limit|quota|用量上限|积分不足|余额不足/.test(m)) return false;
   if (/\b401\b|\b403\b|unauthorized|forbidden|invalid.?api.?key|认证|鉴权/.test(m)) return false;
   if (/\b400\b|bad.?request|invalid.?parameter/.test(m)) return false;
+  // 2026-10-20：服务端**过载**同样不重试。
+  //
+  // 503/529 + overloaded/ServiceUnavailable 说的是「现在满载」，不是「这次请求坏了」，
+  // 等一会儿可能就好了 —— 但这里的等待单位是**整轮生成**：
+  // 话目生成一次调用要 5~8 分钟，为一次过载再等 8 分钟，命中率极低
+  // （2026-10-19 实测：529 之后重试仍然失败），却让用户白等一倍时间。
+  //
+  // 快速失败 + 人话提示，让用户一两分钟后再点，体验远好于干等。
+  // 注意 502/504 不在此列 —— 那是网关抖动，重试有意义。
+  if (/\b(503|529)\b/.test(m)
+    || /overloaded|serviceunavailable|service temporarily unavailable|no available server/.test(m)) return false;
   // 再判定：这些是「换个时间点再来一次」有可能成功的
   if (/fetch failed|econnreset|econnrefused|etimedout|enotfound|socket hang up/.test(m)) return true;
   if (/请求超时|超时/.test(msg)) return true;         // abortableFetch 翻译过的中文文案
@@ -59,6 +70,25 @@ export function isRetryableTransportError(msg: string): boolean {
 /** 退避等待，避免网络抖动时立刻再撞一次。 */
 function sleepMs(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
+}
+
+/**
+ * 服务端过载（2026-10-20）。
+ *
+ * 与 isRetryableTransportError 分开，因为它要决定的不只是「要不要重试」，
+ * 还有「失败时给用户看什么」—— 原始报错是 "error 529: overloaded"，
+ * 用户看到只会更慌，不知道是自己操作错了还是能重试。
+ */
+export function isOverloadError(msg: string): boolean {
+  const m = msg.toLowerCase();
+  return /\b(503|529)\b/.test(m)
+    || /overloaded|serviceunavailable|service temporarily unavailable|no available server/.test(m);
+}
+
+/** 配额用尽。 */
+export function isQuotaError(msg: string): boolean {
+  const m = msg.toLowerCase();
+  return /\b429\b/.test(m) || /rate.?limit|quota|用量上限|积分不足|余额不足/.test(m);
 }
 
 export function getTextProvider(config: { provider?: string }) {  switch (config.provider) {
@@ -187,6 +217,20 @@ export async function callStructuredJson<T>(
         );
         await sleepMs(1200);
         continue;
+      }
+      // 2026-10-20：过载 / 配额 —— 快速失败，但要说人话。
+      // 原始报错是 "error 529: overloaded"，用户看到只会更慌，
+      // 不知道是自己操作错了、还是等一下就能重试。
+      if (isOverloadError(msg)) {
+        throw new Error(
+          '模型服务当前过载（服务端满载），本次生成已中止。'
+          + '等 1~2 分钟后重新点「生成本季话目」即可 —— 不是你的操作有问题。',
+        );
+      }
+      if (isQuotaError(msg)) {
+        throw new Error(
+          '模型 API 配额已用尽，本次生成已中止。请充值后重试。',
+        );
       }
       throw e;
     } finally {

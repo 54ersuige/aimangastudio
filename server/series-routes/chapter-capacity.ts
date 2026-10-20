@@ -29,6 +29,21 @@
 /** 每格分镜在 summary 里占用的字数预算。 */
 export const CHARS_PER_PANEL = 20;
 
+/**
+ * 容量判据的容差（2026-10-20 新增）。
+ *
+ * 实测：pageCount=3 的话 summary 写到 **353 字**，门槛是 360 字 —— 差 7 个字。
+ * 7 个字是"半句话"的量，却让整季 5~8 分钟的生成全部作废、整轮重来。
+ *
+ * 根因：20 字/格这个系数本来就是拍脑袋估的，字数估算本身很粗。
+ * 拿粗估结果做「差一个像素就否决」的闸门不合理 ——
+ * 差几格时更该让下游拆解时取舍，而不是把上游的整份工作扔掉。
+ *
+ * 现在：缺 10% 以内（18 格 → 少 2 格）直接放过；
+ * 缺得更多才判定「剧情量真的不够」，那时才值得返工。
+ */
+export const CAPACITY_TOLERANCE = 0.1;
+
 /** 每批固定 6 格。 */
 export const PANELS_PER_BATCH = 6;
 
@@ -85,6 +100,15 @@ export function summaryCoversPageCount(summary: string, pageCount: number): bool
 /**
  * 校验规划结果，必要时给出可执行的返工指令。
  * 返回 null = 通过；返回字符串 = 不通过，且该字符串是要塞回给模型的理由。
+ *
+ * 2026-10-20 两条修正：
+ *  1. **给 10% 容差**（见 CAPACITY_TOLERANCE）。原来差 7 个字就整季作废。
+ *  2. **返工指令只说容量，不掺张力**。
+ *     原来这条指令末尾还挂着「并且这一话要有戏剧张力——有明确的冲突或转折，
+ *     结尾停在一个未解决的地方」。把两个独立问题捆在一起回喂，模型会为了
+ *     满足「张力」把 summary 继续写长 → 反而更容易撞上密度上限。
+ *     张力是**软要求**，它已经在 prompt 的硬要求段里了；
+ *     硬校验的返工指令必须只讲可客观判定的问题。
  */
 export function checkChapterCapacity(
   summary: string,
@@ -92,7 +116,9 @@ export function checkChapterCapacity(
 ): string | null {
   const need = panelsForPageCount(pageCount);
   const have = estimatedPanels(summary);
-  if (have >= need) return null;
+  // 允许少几格：差一点点不值得把整份工作扔掉重来
+  const allowedMiss = Math.ceil(need * CAPACITY_TOLERANCE);
+  if (have >= need - allowedMiss) return null;
   const suggested = Math.max(
     1,
     Math.ceil(need * CHARS_PER_PANEL),
@@ -102,9 +128,30 @@ export function checkChapterCapacity(
     `按每格 ${CHARS_PER_PANEL} 字估计只够演 ${have} 格 —— 剩下 ${need - have} 格没有剧情可写。`,
     `请把这件事写大一点：summary 至少 ${suggested} 字，并且必须能拆出**恰好 ${need} 个画面点**，`,
     `每个画面点一句话（一句 = 一格），点与点之间要有推进（不是同一个意思换句话说）。`,
-    `并且这一话要有戏剧张力 —— 有明确的冲突或转折，结尾停在一个**未解决**的地方`,
-    `（一句怼回去、被当众甩锅、发现某件事…），不要在本话内收干净。`,
   ].join('');
+}
+
+/**
+ * 容量不足时，把批次数**降到写得起的档位**，而不是作废重做（2026-10-20）。
+ *
+ * 为什么需要：容量门槛是按「每格 20 字」硬算出来的，而这个系数只对
+ * 某一类模型的表达密度成立。换模型后实测：
+ *   - 写 360~520 字的模型 → 3 批一次过；
+ *   - 写 240~310 字的模型 → **每一话都要重试**，而 240~310 字
+ *     撑 2 批（12 格）其实是绰绰有余的。
+ * 逼模型写不出它写不出的长度没有意义 —— 该调整的是格数，不是模型。
+ *
+ * 与 CAPACITY_TOLERANCE 同一个精神：差几格交给下游拆解时取舍，
+ * 不要把上游已经写好的整份内容扔掉重来。
+ *
+ * 返回 null = 连最低档（2 批 = 12 格）都撑不住，那是真的内容太少，
+ * 该让模型重写。
+ */
+export function fitPageCount(summary: string, pageCount: number): number | null {
+  for (let pc = pageCount; pc >= BATCHES_PER_EPISODE_MIN; pc--) {
+    if (checkChapterCapacity(summary, pc) === null) return pc;
+  }
+  return null;
 }
 
 /**
