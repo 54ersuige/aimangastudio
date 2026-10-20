@@ -23,6 +23,7 @@
 - [[review-thresholds-relaxed]] — 审核标准下调的决策依据：6 格里 4 格烧满 3 次重试但原图其实合格；review 70→78、对齐缺一→60% 呈现率、肢体 0.6→0.7、重试 3→2
 - [[chapter-drama-capacity]] — 一话=一天=一次发布，故 12-18 格不是体量指标而是「够不够演完一件事」；实测 4 话 summary 各约 100 字只够 5 拍却预留 18 格；pageCount 四处范围不一致；**补记**：实跑抓出 prompt 字数与代码差一倍、四话全部套路化
 - [[long-task-progress]] — 「生成话没反应」的真相是它转了 8 分钟：三个话目端点同步挂 HTTP 且 text 超时 240s < 实际 5~8 分钟；改走 task 队列 + per-call 超时 + 人话 409
+- [[user-reviews-only]] — 用户只做**审核**、不写分镜：出图前 AI 自动补全描述，补不够就多试几轮，**不派"请你补充"的活**；改机制前先确认产物是谁的
 - [[dna-integrity-check]] — 长期报警的 checksum 报的其实是「行尾不同」不是「内容被改」：core.autocrlf + 无 .gitattributes 让同一份内容两台机器两个哈希；.md 镜像检查是导出了但零调用的死代码
 
 ## Verification
