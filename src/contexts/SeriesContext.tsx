@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   Series,
   SeriesCharacter,
@@ -41,6 +41,7 @@ import {
   updatePanelDialogue as apiUpdatePanelDialogue,
   updatePanelText as apiUpdatePanelText,
   rewritePanelText as apiRewritePanelText,
+  listTasks as apiListTasks,
 } from '../services/seriesClient';
 import type { AddCharacterInput } from '../services/seriesClient';
 import type { Arc } from '../types';
@@ -107,6 +108,24 @@ interface SeriesContextValue {
    * 用户面对几分钟的出图只能看到一个没有数字的"生成中"。
    */
   taskProgress: number | null;
+  /**
+   * 后端真实存在的「生成本季话目」任务（2026-10-19）。
+   *
+   * 与 `busy` 的区别是本字段的**全部意义**：
+   * `busy` 是 React 本地 state，只在本标签页、本次 JS 上下文里为真。
+   * 而任务跑在后端 `runTask('arc-chapters:<arcId>')` 里，与浏览器无关。
+   * 刷新页面 / Vite 热重载 / 从创作助手发起 → `busy` 归零但任务照跑，
+   * 按钮错误地恢复可点，点下去撞 409。这个字段读后端真相，补上那一层。
+   *
+   * 非 null 时「生成本季话目」按钮全局禁用（任一季在跑即全部锁住）。
+   *
+   * 2026-10-20：`arcId` 用来区分「是哪一季在跑」。
+   * 没有它的话，busy 是全局的单一布尔值，**每一季都会渲染出同一份
+   * 「生成中 48%」** —— 用户看到的 4 个季全在跑，实际后端只有 1 个任务。
+   * 拿不到 arcId 时（老后端 / 非 arc 类型）为 null，此时只显示静态提示，
+   * 绝不显示进度条 —— 宁可少说，不可说错。
+   */
+  runningArcTask: { arcId: string | null; progress: number } | null;
   error: string | null;
   clearError: () => void;
   // 手动编辑（不依赖 AI 对话）
@@ -164,6 +183,7 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
   const [selectedEpisodeId, setSelectedEpisodeId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [taskProgress, setTaskProgress] = useState<number | null>(null);
+  const [runningArcTask, setRunningArcTask] = useState<{ arcId: string | null; progress: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   /**
@@ -198,6 +218,49 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
   }, [currentSeries]);
 
   useEffect(() => { void refreshList(); }, [refreshList]);
+
+  // —— 后端「生成本季话目」任务探针（2026-10-19）——
+  //
+  // 问题：`busy` 只活在这个标签页里，而后端 runTask 与浏览器无关。
+  // 刷新 / 热重载 / 走创作助手这三条路径都会让 busy 归零、任务照跑，
+  // 按钮错误地恢复可点，点下去撞 409（历史上就是这么白等过好几分钟）。
+  //
+  // 这里定期问后端「有没有 arc-chapters 任务在跑」，作为按钮的**补充**判据：
+  // 本地 busy 仍然是首选（快、零额外请求），这个只负责补上本地丢失的真相。
+  //
+  // 仅在「还存在没拆过话的季」时轮询 —— 全拆完后这类按钮不再渲染，
+  // 继续轮询没有意义。
+  const arcsAwaitingSplit = !!currentSeries?.arcs?.some(a => a.chapters.length === 0);
+  // 用 ref 取 refreshCurrent：避免它随 currentSeries 变化而让整个 effect 反复重建
+  const refreshRef = useRef(refreshCurrent);
+  useEffect(() => { refreshRef.current = refreshCurrent; }, [refreshCurrent]);
+  // 记住上一次探针结果，用来发现「任务刚刚跑完」这个瞬间
+  const wasArcRunningRef = useRef(false);
+
+  useEffect(() => {
+    if (!currentSeries || !arcsAwaitingSplit) return;
+    let alive = true;
+    const check = async () => {
+      try {
+        const res = await apiListTasks();
+        if (!alive) return;
+        const hit = (res.tasks ?? []).find(t => t.kind === 'arc-chapters' && t.status === 'running');
+        setRunningArcTask(hit
+          ? { arcId: hit.target?.type === 'arc' ? hit.target.id : null, progress: hit.progress ?? 0 }
+          : null);
+        // 任务刚跑完 → 主动拉一次最新数据。
+        // 否则新拆出的话要等用户手动刷新页面才看得见，
+        // 观感上就是「按钮解锁了但结果没出来」。
+        if (wasArcRunningRef.current && !hit) void refreshRef.current();
+        wasArcRunningRef.current = !!hit;
+      } catch {
+        // 后端未就绪 / 网络抖动：保持上一次状态，别让 UI 跟着闪。
+      }
+    };
+    void check();
+    const timer = setInterval(check, 3000);
+    return () => { alive = false; clearInterval(timer); };
+  }, [currentSeries, arcsAwaitingSplit]);
 
   const setCurrentSeriesId = useCallback(async (id: string | null) => {
     if (!id) {
@@ -776,12 +839,13 @@ export function SeriesProvider({ children }: { children: React.ReactNode }) {
     updatePanelDialogueInCurrent,
     updatePanelTextInCurrent,
     rewritePanelTextInCurrent,
-    busy, error, clearError, taskProgress,
+    busy, error, clearError, taskProgress, runningArcTask,
   }), [
     seriesList, loadingList, refreshList,
     currentSeries, setCurrentSeriesId, create, patch, remove, refreshCurrent,
     step, genWorldview, genCharacters, addChar, updateChar, deleteChar, regenCharImg, regenCharShot, genChapters,
     selectedPageId, breakdown, gen, regen, rewritePg, rewritePn, continueNext, busy, error, clearError, taskProgress,
+    runningArcTask,
     progressOpts,
     selectedEpisodeId,
     breakdownById, generateById, regenerateById, rewritePageById, rewritePanelById, continuePageById, generatePanelById,

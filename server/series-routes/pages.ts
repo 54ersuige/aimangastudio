@@ -401,18 +401,21 @@ router.post('/series/:id/pages/:pageId/generate', async (req, res) => {
   const { chapter: targetChapter, page: targetPage } = found;
   if (targetPage.panels.length === 0) return sendError(res, 400, '请先生成分镜');
   if (targetPage.status === 'generating') return sendError(res, 409, '该页正在生成中，请稍候');
-  // 同步置为 generating：利用单线程原子性挡住并发重复点击
-  updatePage(series.id, targetChapter.id, targetPage.id, { status: 'generating', errorMessage: undefined });
-
-  // 增量语义（2026-09-02 话级模型）：generate 只补缺失格，已有图不动（整批重画走 regenerate）
+  // 2026-10-20：**先查缺不缺图，再置 generating**。
+  // 原来的顺序是先置 generating 再查 —— 于是「本批已出齐」这个 400 分支
+  // 会把一个**已经完成**的批次留在 'generating' 状态，
+  // 用户再点只会撞 409「正在生成中」，而那个任务早就不存在了。
+  // 增量语义（只补缺失格，已有图不动）本身没问题，坏的只是这两行的先后。
   const sortedAll = [...targetPage.panels].sort((a, b) => a.index - b.index);
   const missingPanels = sortedAll.filter(p => !p.imageUrl);
   if (missingPanels.length === 0) return sendError(res, 400, '本批分镜图已齐全；如需整批重画请用「重画此批」');
+  // 同步置为 generating：利用单线程原子性挡住并发重复点击
+  updatePage(series.id, targetChapter.id, targetPage.id, { status: 'generating', errorMessage: undefined });
   let taskId: string;
   try {
     taskId = runTask(`page:${targetPage.id}`, 'page-generate', async (tid) => {
       try {
-        const { paths, failures } = await generatePanelImages(
+        const { paths, failures, hints } = await generatePanelImages(
           series, targetPage.sceneDescription, missingPanels,
           `generate 第${targetPage.pageNumber}页`, dnaKey,
           { onProgress: (d, t) => setTaskProgress(tid, Math.round((d / t) * 100)) },
@@ -429,6 +432,8 @@ router.post('/series/:id/pages/:pageId/generate', async (req, res) => {
           // 用户可只补那几格，而不是重画整批再付一遍钱。
           status: failures.length > 0 ? 'error' : 'done',
           errorMessage: failures.length > 0 ? describePanelFailures(failures, missingPanels.length) : undefined,
+          // 2026-10-20：描述偏短的提示 —— 成功但建议你再看一眼，和"失败"是两回事。
+          hint: hints && hints.length > 0 ? hints.join('；') : undefined,
         });
         return { page: updated };
       } catch (e: any) {

@@ -49,7 +49,7 @@ export function SeriesWorkbench() {
     updateChapterInCurrent, moveChapterInCurrent, deleteChapterInCurrent,
     updatePageInCurrent, replacePanelsInCurrent, insertPanelInCurrent, deletePanelInCurrent,
     refreshCurrent,
-    busy, taskProgress, error, clearError,
+    busy, taskProgress, runningArcTask, error, clearError,
   } = ctx;
 
   const [loglineTitle, setLoglineTitle] = useState('');
@@ -302,9 +302,15 @@ export function SeriesWorkbench() {
   const cStatus = currentSeries.characters.length === 0 ? 'pending' : 'done';
   // 季蓝图/季骨架已就绪但还没拆出任何话 —— 不是"未开始"，是"待拆话目"
   const structureReady = (currentSeries.worldview?.arcBlueprints?.length ?? 0) > 0 || (currentSeries.arcs?.length ?? 0) > 0;
+  // 2026-10-19：让「进行中」名副其实。
+  // 此前只要 structureReady 就标 in_progress —— 那一刻**根本没有任务在跑**，
+  // 徽章却在说「进行中」。用户据此以为在生成、又发现按钮可点，
+  // 矛盾感正是从这里来的。现在只有后端真的有 arc-chapters 任务才叫进行中，
+  // 否则拆话前说「待拆话」（见 ivBadgeText）。
   const ivStatus: 'pending' | 'in_progress' | 'done' = allChapters.length > 0
     ? (allChapters.every(ch => ch.pages.every(p => p.panels.every(pn => !!pn.imageUrl))) ? 'done' : 'in_progress')
-    : structureReady ? 'in_progress' : 'pending';
+    : runningArcTask ? 'in_progress' : 'pending';
+  const ivBadgeText = allChapters.length === 0 && structureReady && !runningArcTask ? '待拆话' : undefined;
   const pStatus = allChapters.length === 0 ? 'pending'
     : allChapters.every(ch => ch.pages.every(p => p.panels.every(pn => !!pn.imageUrl))) ? 'done' : 'in_progress';
 
@@ -407,6 +413,7 @@ export function SeriesWorkbench() {
         index="IV"
         kicker="季 · 话目"
         status={ivStatus}
+        badgeText={ivBadgeText}
         active={step === 'chapters'}
         title={currentSeries.arcs && currentSeries.arcs.length > 0
             ? `${currentSeries.arcs.length} 季 · ${allChapters.length} 话`
@@ -427,6 +434,7 @@ export function SeriesWorkbench() {
           onPreviewChapter={(ch, index) => setPreviewChapter({ ch, index })}
           busy={busy}
           taskProgress={taskProgress}
+          runningArcTask={runningArcTask}
         />
       </CardSection>
 

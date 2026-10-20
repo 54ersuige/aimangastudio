@@ -143,13 +143,33 @@ export function startTaskHeartbeat(
   return () => clearInterval(timer);
 }
 
+/**
+ * 从互斥键解析出「正在处理哪个资源」。
+ *
+ * 2026-10-20：前端需要知道**是哪一季**在生成，才能只把进度条画在那儿。
+ * 但 key 本身（`arc-chapters:<id>`）是内部格式，不该让前端去解析字符串 ——
+ * 所以这里翻译成结构化的 target，key 继续对前端隐身。
+ */
+function parseTarget(key?: string): { type: string; id: string } | undefined {
+  if (!key) return undefined;
+  const i = key.indexOf(':');
+  if (i < 0) return undefined;
+  const kind = key.slice(0, i);
+  const id = key.slice(i + 1);
+  if (!id) return undefined;
+  if (kind === 'arc-chapters' || kind === 'append-chapter') return { type: 'arc', id };
+  if (kind === 'replan-chapter') return { type: 'chapter', id };
+  return { type: kind, id };
+}
+
 export function getTask(id: string): TaskState | undefined {
   cleanup();
   const t = tasks.get(id);
   if (!t) return undefined;
-  // 不向前端暴露内部 key
+  // 不向前端暴露内部 key —— 改为给出结构化的「正在处理哪个资源」
   const { key: _key, ...state } = t as TaskState & { key?: string };
-  return state;
+  const target = parseTarget(_key);
+  return target ? { ...state, target } : state;
 }
 /** 调试：列出所有内存中的 task（不含内部 key）。仅本地使用。 */
 export function listTasks(): TaskState[] {
@@ -157,7 +177,8 @@ export function listTasks(): TaskState[] {
   const out: TaskState[] = [];
   for (const t of tasks.values()) {
     const { key: _key, ...state } = t as TaskState & { key?: string };
-    out.push(state);
+    const target = parseTarget(_key);
+    out.push(target ? { ...state, target } : state);
   }
   return out;
 }

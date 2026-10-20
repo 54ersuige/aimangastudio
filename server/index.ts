@@ -18,6 +18,7 @@ import apiRouter from './routes.js';
 import seriesRouter from './series-routes.js';
 import { IMAGE_DIR } from './image-store.js';
 import { verifyAllDna } from './dna/registry.js';
+import { getConfig } from './config.js';
 
 // 启动时校验所有 DNA 文件完整性（防"TS 与 .md 漂移"）。
 // 不一致仅警告，不阻断——避免半夜叫醒用户。
@@ -71,4 +72,9 @@ app.get('/health', (_req, res) => {
 const HOST = ALLOW_LAN ? '0.0.0.0' : '127.0.0.1';
 app.listen(PORT, HOST, () => {
   console.log(`AIMangaStudio server listening on http://${HOST}:${PORT}` + (ALLOW_LAN ? '（局域网已开放）' : '（仅本机，需局域网请设 ALLOW_LAN=1）'));
+  // 2026-10-20：启动即打印**实际生效**的模型配置。
+  // 这套东西有 .env 和 server/runtime-config.json 两套，后者在时整个盖掉前者 ——
+  // 只看 .env 会以为在用 agnes，实际可能跑在另一个 provider 上。
+  // 启动日志里直接写明，不打印 apiKey。
+  try { getConfig(); } catch (e: any) { console.warn('[config] 读取生效配置失败:', e?.message || e); }
 });

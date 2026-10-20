@@ -770,7 +770,7 @@ const DescriptionRepairSchema = {
           index: { type: 'integer', description: 'panel 在原数组中的 0-based 序号' },
           extendedDescription: {
             type: 'string',
-            description: '在原 description 基础上追加细节，使总长 ≥ 60 字。保留原文不删减，必要时改写不通顺处。',
+            description: '这一格的**最终画面描述**：在原 description 的信息基础上扩写到 ≥ 60 字。原文里的剧情要点必须保留，画面细节补足。',
           },
         },
         required: ['index', 'extendedDescription'],
@@ -787,6 +787,86 @@ const DescriptionRepairZ = z.object({
   })).min(1),
 });
 
+/**
+ * 把「补充句」拼到原描述**后面**，产出新描述；用户原文一字不动。
+ *
+ * 2026-10-20：出图前自动补全原本是 `description = extended`（整段覆盖）——
+ * 等于 AI 在出图前**悄悄改写用户写的分镜**。现在改成追加式：
+ * AI 只给补充句，由本函数负责拼接，原文永远保留。
+ *
+ * 补完仍不足 60 字 → 返回 null（交回上层提示用户自己补，不硬凑）。
+ */
+export function mergeSupplement(
+  original: string,
+  supplement: string,
+  minLength = 60,
+): string | null {
+  const base = (original || '').trim();
+  const add = (supplement || '').trim();
+  if (!add) return null;
+  const merged = base + add;
+  return merged.length >= minLength ? merged : null;
+}
+
+/**
+ * 采纳一次补全结果：**够长才用**，不够长返回 null（交给调用方再试一轮）。
+ *
+ * 2026-10-20：分镜描述是 AI 拆的、补全是流程的一部分 ——
+ * 用户只做**审核**，不写分镜。所以补全失败不能变成"请你自己去补"，
+ * 而应该是**系统自己多试几轮**。
+ * 原来的实现补不够就 `continue`（这一格就带着短描述去出图了），
+ * 画面会失焦，用户审核时反而看不出来对不对。
+ */
+export function adoptExtended(
+  original: string,
+  extended: string,
+  minLength = 60,
+): string | null {
+  const ext = (extended || '').trim();
+  if (!ext) return null;
+  return ext.length >= minLength ? ext : null;
+}
+
+export async function repairShortDescriptionsWithRetry(
+  panels: Panel[],
+  sceneDescription: string,
+  dnaKey: DnaKey,
+  maxRounds = 3,
+): Promise<boolean> {
+  // 2026-10-20：多轮补全。
+  //
+  // 为什么：一轮补不够（模型没写够 60 字）就跳过的话，那一格会带着
+  // 短描述去出图 —— 画面失焦，用户审核时**看不出来画的对不对**，
+  // 反而是审核体验最差的一种失败。
+  //
+  // 现在：每一轮只处理**还没补够**的格，补够的立刻退出候选。
+  // 三轮还补不够的，才作为提示告诉用户"这一格可能与剧情有出入"，
+  // 但仍然是**信息**，不是"请你去补"的待办（用户不写分镜）。
+  let anyPatched = false;
+  for (let round = 1; round <= maxRounds; round++) {
+    const before = panels.map(p => (p.description || '').trim().length);
+    let patchedThisRound = false;
+    try {
+      patchedThisRound = await repairShortDescriptions(panels, sceneDescription, dnaKey);
+    } catch (e: any) {
+      console.warn(`[repair-short-descriptions] 第 ${round} 轮补全失败：${e?.message || e}`);
+      break;
+    }
+    anyPatched = anyPatched || patchedThisRound;
+    const stillShort = panels.filter((p, i) => before[i] < 60 && (p.description || '').trim().length < 60);
+    if (stillShort.length === 0) {
+      console.log(`[repair-short-descriptions] 第 ${round} 轮后全部补齐`);
+      break;
+    }
+    if (round < maxRounds) {
+      console.log(
+        `[repair-short-descriptions] 第 ${round} 轮后仍有 ${stillShort.length} 格偏短，继续补全`,
+      );
+    }
+  }
+  return anyPatched;
+}
+
 export async function repairShortDescriptions(
   panels: Panel[],
   sceneDescription: string,
@@ -798,15 +878,16 @@ export async function repairShortDescriptions(
   if (items.length === 0) return false;
 
   const prompt = [
-    '为以下漫画分镜补全 description 到 ≥ 60 字（中文字符），不要删减原文，必要时改写不通顺处。',
-    '补全方向：①每个人的具体位置与相对距离 ②正在做的具体动作/手势 ③视线方向（看哪/看谁/看地面）④1-2 个关键道具及其状态。',
+    '为以下漫画分镜扩写 description 到 ≥ 60 字（中文字符）。',
+    '原文里的剧情要点（谁、在哪、做什么、关键道具）必须保留，只是补足画面细节。',
+    '扩写方向：①每个人的具体位置与相对距离 ②正在做的具体动作/手势 ③视线方向（看哪/看谁/看地面）④1-2 个关键道具及其状态。',
     '',
     `场景：${sceneDescription.slice(0, 300)}`,
     '',
     '分镜列表（index | 当前描述）：',
     ...items.map(it => `- ${it.idx} | ${it.p.description || ''}`),
     '',
-    '严格输出 JSON，extendedDescription 必须包含原文并在其基础上扩写到 ≥ 60 字。',
+    '严格输出 JSON，extendedDescription 必须是这一格的完整最终描述。',
   ].join('\n');
 
   let result: z.infer<typeof DescriptionRepairZ>;
@@ -831,9 +912,9 @@ export async function repairShortDescriptions(
   for (const fix of result.fixes) {
     const it = items.find(x => x.idx === fix.index);
     if (!it) continue;
-    const extended = (fix.extendedDescription || '').trim();
-    if (extended.length < 60) continue;
-    it.p.description = extended;
+    const adopted = adoptExtended(it.p.description || '', fix.extendedDescription || '');
+    if (adopted === null) continue;   // 这次没写够 → 下一轮再试（见调用方的重试循环）
+    it.p.description = adopted;
     patched++;
   }
   console.log(`[repair-short-descriptions] 自动补全 ${patched}/${items.length} 个分镜的 description`);
@@ -926,6 +1007,13 @@ export interface PanelGenResult {
   paths: Array<string | null>;
   /** 失败格清单（供调用方拼错误文案 + 保留成功结果）。 */
   failures: PanelGenFailure[];
+  /**
+   * 需要用户动手的提示（2026-10-20）。
+   *
+   * 例："第 3 格描述太短（41/60 字），画面细节可能不足，建议你补充后再重画"。
+   * 系统**不替用户改写分镜**了 —— 补不够就把问题交回给用户。
+   */
+  hints?: string[];
 }
 
 export interface GeneratePanelImagesOptions {
@@ -1006,9 +1094,15 @@ export async function generatePanelImages(
       //   - 「一次性配角缺性别标签」 → repairExtraCharacterGenders
       //   - 「description 太短」       → repairShortDescriptions
       // 两类独立修复，串行跑（先短文补全、再性别标签），任意一步降级为 warning 继续。
+      //
+      // 2026-10-20：短文补全**改成多轮重试**。
+      // 分镜描述是 AI 拆的、补全是流程的一部分，用户只做审核、不写分镜 ——
+      // 所以补不够不能变成"请你自己去补"，得是系统自己多试几轮。
+      // 原实现一轮补不够就跳过，那一格就带着短描述去出图 → 画面失焦 →
+      // 用户审核时反而看不出来画的对不对（这才是最伤的）。
       let descRepaired = false;
       try {
-        descRepaired = await repairShortDescriptions(sorted, sceneDescription, dnaKey);
+        descRepaired = await repairShortDescriptionsWithRetry(sorted, sceneDescription, dnaKey);
       } catch (e: any) {
         console.warn(`[generatePanelImages] description 补全调用失败（降级继续）：${e?.message || e}`);
       }
@@ -1038,6 +1132,24 @@ export async function generatePanelImages(
   const imageProvider = getImageProvider(config);
   const style = series.worldview.artStyle;
   const mood = series.worldview.paletteMood;
+
+  // 2026-10-20：**补完仍不够长的格 → 告诉用户"这一格画面可能与剧情有出入"。**
+  //
+  // 注意措辞：这是**审核信息**，不是待办。
+  // 分镜描述是 AI 拆的、补全是流程的一部分，用户只做审核、不写分镜 ——
+  // 所以不能说"建议你补充"（那是给他派活），只能说"这格可能画不准，审核时留意"。
+  const hints: string[] = [];
+  for (const p of sorted) {
+    const len = (p.description || '').trim().length;
+    if (len > 0 && len < 60) {
+      hints.push(`第 ${p.index + 1} 格描述偏简（${len}/60 字），这一格画面可能与剧情有出入，审核时请留意`);
+    }
+  }
+  if (hints.length > 0) {
+    console.warn(
+      `[generatePanelImages] ${logCtx}：${hints.length} 格多轮补全后仍偏简，已提示用户审核时留意`,
+    );
+  }
 
   // 2026-10-15：串行 for → 有界并发池。
   // 每格的逻辑完全自包含（只读 series / config / provider，产物写各自的落盘路径），
@@ -1073,7 +1185,7 @@ export async function generatePanelImages(
       `失败 ${panelFailures.map(f => `第${f.panelIndex + 1}格`).join('、')}（已保留成功图）`,
     );
   }
-  return { paths, failures: panelFailures };
+  return { paths, failures: panelFailures, hints };
 }
 
 /** 单格出图所需的外部依赖（每格共享，提前取好避免在并发体内反复构造）。 */

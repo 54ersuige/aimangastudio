@@ -121,6 +121,29 @@ function loadDefaultsFromEnv(): ModelConfig {
   };
 }
 
+/**
+ * 打印**实际生效**的配置（2026-10-20）。
+ *
+ * 为什么必须打：这套东西有**两套配置** ——
+ *   1. `.env`（项目根）：TEXT_PROVIDER=agnes / TEXT_MODEL=agnes-3.0-flash
+ *   2. `server/runtime-config.json`：存在就**整个盖掉** .env
+ * 2026-10-20 事故现场：.env 写着 agnes，实际生效的是 runtime-config 里的
+ * minimax + 一个手滑拼错的模型名。**看 .env 是看不出在用什么模型的**，
+ * 于是排查时先查错了文件。
+ *
+ * 打印 provider + model + 来源，让"我到底在用什么"一眼可见。
+ * 不打印 apiKey。
+ */
+function logEffectiveConfig(value: ModelConfig): void {
+  const from = existsSync(CONFIG_PATH) ? 'server/runtime-config.json' : '.env（无 runtime-config.json）';
+  console.log(
+    `[config] 生效配置（来源：${from}）\n`
+    + `        text   = ${value.text.provider} / ${value.text.model}   (${value.text.baseUrl || '默认'})\n`
+    + `        image  = ${value.image.provider} / ${value.image.model}\n`
+    + `        vision = ${value.vision.enabled ? '开' : '关'} ${value.vision.provider} / ${value.vision.model}`,
+  );
+}
+
 export function getConfig(): ModelConfig {
   let mtime = 0;
   try {
@@ -144,6 +167,7 @@ export function getConfig(): ModelConfig {
     }
   }
   configCache = { mtime, value };
+  logEffectiveConfig(value);
   return value;
 }
 

@@ -275,6 +275,14 @@ function EpisodeCard(props: {  series: Series;
         </div>
       )}
 
+      {/* 2026-10-20：提示（不是错误）—— 比如"这格描述太短，建议你补充"。
+          系统不再替用户改写分镜，改由用户自己决定要不要动稿。 */}
+      {chapter.pages.some(p => p.hint) && (
+        <div style={{ padding: '0.5rem 0.75rem', background: 'var(--bg-soft)', color: 'var(--ink-2)', fontSize: '0.8125rem', marginBottom: '1rem', borderLeft: '3px solid var(--accent)' }}>
+          {chapter.pages.filter(p => p.hint).map(p => p.hint).join('；')}
+        </div>
+      )}
+
       {/* —— 整话没有分镜 —— */}
       {totalPanels === 0 && (
         <div style={{

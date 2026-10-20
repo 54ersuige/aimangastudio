@@ -1,10 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import type { Series, Chapter, Arc } from '../../types';
 import { PlusIcon, RedoAltIcon } from '../icons';
 import { toRoman } from './ui';
 
 function ChaptersCard({
-  series, targetPages, setTargetPages, onGenerate, onGenerateArcs, onGenerateArcChapters, onAppendNextChapter, onPickEpisode, onEditChapter, onPreviewChapter, busy, taskProgress,
+  series, targetPages, setTargetPages, onGenerate, onGenerateArcs, onGenerateArcChapters, onAppendNextChapter, onPickEpisode, onEditChapter, onPreviewChapter, busy, taskProgress, runningArcTask,
 }: {
   series: Series;
   targetPages: number;
@@ -19,8 +19,23 @@ function ChaptersCard({
   busy: boolean;
   /** 2026-10-16：长任务进度（话目生成实测 8 分钟，没进度会被当成卡死） */
   taskProgress?: number | null;
+  /**
+   * 2026-10-19：后端真实存在的 arc-chapters 任务（刷新页面也不丢）。
+   * 非 null 时「生成本季话目」全局禁用 —— 任一季在生成，所有季都锁，
+   * 避免用户点下去撞 409。详见 SeriesContext.runningArcTask 的注释。
+   *
+   * 2026-10-20：arcId 用来判断「是不是这一季在跑」——
+   * 只有那一季才显示「生成中…」和进度条。
+   */
+  runningArcTask?: { arcId: string | null; progress: number } | null;
 }) {
   const arcBlueprints = series.worldview?.arcBlueprints ?? [];
+  // 2026-10-20：本页点的是哪一季，本地记一笔。
+  //
+  // 为什么需要这层：后端新加的 target 字段要重启后端才生效，而重启会杀掉
+  // 正在跑的任务 —— 用户等半天不该因为"要显示对"而白等。
+  // 本地这份在**本页发起的场景**下就是准确答案；后端 target 到位后以它为准。
+  const [activeArcId, setActiveArcId] = useState<string | null>(null);
   const hasArcStructure = !!(series.arcs && series.arcs.length > 0);
   const legacyChapters = series.chapters ?? [];
   const totalChapters = hasArcStructure
@@ -90,6 +105,9 @@ function ChaptersCard({
                 episodeOffset={episodeOffset}
                 busy={busy}
                 taskProgress={taskProgress}
+                runningArcTask={runningArcTask}
+                activeArcId={activeArcId}
+                onMarkArcRunning={setActiveArcId}
                 targetPages={targetPages}
                 setTargetPages={setTargetPages}
                 onGenerateArcChapters={(opts) => onGenerateArcChapters(arc.id, opts || {})}
@@ -165,7 +183,7 @@ function ChaptersCard({
 }
 
 function ArcBlock({
-  arc, episodeOffset, busy, taskProgress, targetPages, setTargetPages, onGenerateArcChapters, onAppendNextChapter, onPickEpisode, onEditChapter, onPreviewChapter,
+  arc, episodeOffset, busy, taskProgress, runningArcTask, activeArcId, onMarkArcRunning, targetPages, setTargetPages, onGenerateArcChapters, onAppendNextChapter, onPickEpisode, onEditChapter, onPreviewChapter,
 }: {
   arc: Arc;
   /** 本 arc 前面所有 arc 的话数之和 —— 用于"第 X 话"全局连续编号 */
@@ -173,6 +191,12 @@ function ArcBlock({
   busy: boolean;
   /** 2026-10-16：长任务进度（话目生成实测 8 分钟，没进度会被当成卡死） */
   taskProgress?: number | null;
+  /** 2026-10-19：后端真实任务态，补上 busy 丢失的那部分真相 */
+  runningArcTask?: { arcId: string | null; progress: number } | null;
+  /** 2026-10-20：本页发起的季（后端 target 还没上线时的兜底） */
+  activeArcId?: string | null;
+  /** 2026-10-20：点击时登记"是本季在跑" */
+  onMarkArcRunning?: (arcId: string) => void;
   targetPages: number;
   setTargetPages: (n: number) => void;
   onGenerateArcChapters: (opts?: { targetPageCount?: number; hint?: string }) => Promise<Chapter[] | null>;
@@ -182,6 +206,26 @@ function ArcBlock({
   onPreviewChapter: (ch: Chapter, chapterIndex: number) => void;
 }) {
   const noChapters = arc.chapters.length === 0;
+  // 2026-10-19：两种「正在生成」，缺一不可。
+  //   busy           —— 本标签页点按钮发起的，实时但活不过刷新；
+  //   runningArcTask —— 后端确实在跑（补上刷新 / 创作助手发起的那部分）。
+  // 两者任一为真都必须锁住按钮：后端 runTask 按 arcId 互斥，重复提交只会撞 409。
+  // 采用全局锁（用户拍板）——任一季在跑，所有季的按钮一起锁。
+  const locked = busy || !!runningArcTask;
+  // 2026-10-20：**只有真正在跑的那一季**才算"生成中"。
+  //
+  // 此前判据只有 `locked`，而 busy 是全局单一布尔值 ——
+  // 结果每一季都渲染出「生成中… 48%」，4 个季看起来全在跑，
+  // 实际后端只有 1 个任务。用户被这个假象直接误导过。
+  //
+  // 现在精确认领：后端认领到的（arcId）优先；后端还没给 arcId 时，
+  // 用本页点击时记下的 activeArcId 兜底。
+  const thisArcRunning =
+    (runningArcTask?.arcId != null && runningArcTask.arcId === arc.id)
+    || (busy && runningArcTask?.arcId == null && activeArcId === arc.id);
+  // 只有认领到的那一季才有进度条；认领不到就一句静态提示了事 —— 宁可少说，不可说错。
+  const showProgress = thisArcRunning;
+  const shownProgress = busy ? (taskProgress ?? null) : (runningArcTask?.progress ?? null);
   return (
     <div style={{ background: 'var(--bg-soft)', padding: '1rem 1.25rem', borderLeft: '3px solid var(--accent)' }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.375rem' }}>
@@ -208,8 +252,16 @@ function ArcBlock({
             onChange={e => setTargetPages(Number(e.target.value))}
             style={{ width: '5rem', padding: '0.375rem 0.5rem', border: '1px solid var(--rule-soft)', fontSize: '0.875rem', fontFamily: 'var(--font-mono)', textAlign: 'center' }}
           />
-          <button onClick={() => onGenerateArcChapters({ targetPageCount: targetPages })} disabled={busy} className="btn btn--primary">
-            {busy ? '生成中…' : '生成本季话目 ▸'}
+          <button
+            onClick={() => {
+              onMarkArcRunning?.(arc.id);
+              onGenerateArcChapters({ targetPageCount: targetPages });
+            }}
+            disabled={locked}
+            className="btn btn--primary"
+            title={locked && !thisArcRunning ? '已有季正在生成话目，请等它跑完再点' : undefined}
+          >
+            {thisArcRunning ? '生成中…' : locked ? '已有季在生成…' : '生成本季话目 ▸'}
           </button>
           {/*
             2026-10-16：进度条。
@@ -217,13 +269,31 @@ function ArcBlock({
             此前按钮只有一句不动的「生成中…」，用户据此以为失败又连点两次，
             第二次反撞 409 —— 8 分钟的正常等待被误判成故障。
             长任务没进度 = 每次都会重演这次误会。
+
+            2026-10-19：条件从 `busy` 放宽到 `locked`。
+            原来只有本标签页发起的任务才有进度条，而刷新页面后 `busy` 归零，
+            后端明明还在跑、前端却退回成一句干巴巴的禁用按钮 ——
+            用户完全看不出它在跑、到哪了，只会怀疑是不是卡死了。
+            现在从后端任务队列取进度，刷新后照样能看见数字在爬。
+
+            2026-10-20：条件收窄到 `showProgress`（= 本季确实在跑）。
+            之前 `locked` 一开，每一季都长出同一根进度条、同一串数字，
+            4 个季看上去全在跑，实际后端只有 1 个任务。
+            现在只有认领到的那一季才有进度条，其余季一句静态提示了事。
           */}
-          {busy && taskProgress != null && (
+          {showProgress && shownProgress != null && (
             <span className="kicker" style={{ fontSize: '0.625rem', color: 'var(--accent)', display: 'inline-flex', alignItems: 'center', gap: '0.375rem' }}>
               <span style={{ display: 'inline-block', width: '4rem', height: '3px', background: 'var(--rule-soft)', borderRadius: '2px', overflow: 'hidden' }}>
-                <span style={{ display: 'block', height: '100%', width: `${taskProgress}%`, background: 'var(--accent)', transition: 'width 0.4s ease' }} />
+                <span style={{ display: 'block', height: '100%', width: `${shownProgress}%`, background: 'var(--accent)', transition: 'width 0.4s ease' }} />
               </span>
-              {taskProgress}% · 通常 5~10 分钟，请勿重复点击
+              {busy
+                ? `${shownProgress}% · 通常 5~10 分钟，请勿重复点击`
+                : `已有季在生成话目 · ${shownProgress}% · 请勿重复点击`}
+            </span>
+          )}
+          {locked && !thisArcRunning && (
+            <span className="kicker" style={{ fontSize: '0.625rem', color: 'var(--ink-3)' }}>
+              另一季正在生成话目，请等它跑完
             </span>
           )}
           <span className="kicker" style={{ fontSize: '0.625rem', color: 'var(--ink-3)' }}>每话约 15 格（内部按 6 格/批生成）</span>

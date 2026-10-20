@@ -78,7 +78,7 @@ const TASK_POLL_TIMEOUT_MS = 20_000;
  */
 const TASK_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 
-interface TaskState {
+export interface TaskState {
   id: string;
   kind: string;
   status: 'running' | 'done' | 'error';
@@ -86,6 +86,12 @@ interface TaskState {
   error?: string;
   /** 进度 0-100，仅 running 时更新。 */
   progress?: number;
+  /**
+   * 任务正在处理的资源（2026-10-20）。
+   * type='arc' 时 id 就是 arcId —— 前端据此判断「是哪一季在跑」，
+   * 避免把同一份进度画到每一季头上。
+   */
+  target?: { type: string; id: string };
 }
 
 export interface PostTaskOptions {
@@ -141,6 +147,21 @@ export async function postTask<T>(path: string, body?: unknown, opts: PostTaskOp
     if (task.status === 'error') throw new Error(task.error || '任务执行失败');
     // running → 继续轮询
   }
+}
+
+/**
+ * 列出后端当前任务队列（2026-10-19）。
+ *
+ * 为什么需要它：`postTask` 把 taskId 存在**函数局部变量**里，
+ * 轮询只发生在本标签页、本次 JS 上下文。于是任何让 React `busy` 归零的路径
+ * （F5 刷新 / Vite 热重载 / 从右侧创作助手发起）都会让按钮错误地恢复可点，
+ * 而后端 `runTask` 的互斥仍在生效 —— 用户点下去只会撞 409，白等好几分钟。
+ *
+ * 这是**补充**判据而非替代：本地 busy 仍是首选（响应快、无额外请求），
+ * 这里的查询负责覆盖本地丢失的那部分真相。
+ */
+export async function listTasks(): Promise<{ tasks: TaskState[] }> {
+  return request('/api/tasks');
 }
 
 // ============ Series CRUD ============

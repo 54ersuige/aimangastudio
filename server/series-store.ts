@@ -210,8 +210,24 @@ function migrate(series: Series[]): boolean {
           changed = true;
         }
         if (p.status === 'generating') {
-          p.status = 'error';
-          p.errorMessage = '服务重启导致生成中断，请重新生成';
+          // 2026-10-20：原来一律标成 error + 「请重新生成」，
+          // 但**图其实全出好了** —— 只是进程没了、状态没写回。
+          // 一刀切会让用户看到红条以为白跑了，实际上每一格都有图。
+          // 所以按「有没有图」区分：有图 → done（真的完成了）；缺图 → error（确实要补）。
+          const allHaveImage = p.panels.length > 0 && p.panels.every(pn => !!pn.imageUrl);
+          p.status = allHaveImage ? 'done' : 'error';
+          p.errorMessage = allHaveImage ? undefined : '服务重启导致生成中断，请重新生成';
+          changed = true;
+        } else if (
+          p.status === 'error'
+          && (p.errorMessage ?? '').includes('服务重启导致生成中断')
+          && p.panels.length > 0
+          && p.panels.every(pn => !!pn.imageUrl)
+        ) {
+          // 同一件事的历史遗留：已经被上面那条规则标成 error、但图其实全出好了。
+          // 只认「服务重启导致」这一种来源 —— 其它 error 是真实的失败，不该被抹平。
+          p.status = 'done';
+          p.errorMessage = undefined;
           changed = true;
         }
         for (const pn of p.panels) {

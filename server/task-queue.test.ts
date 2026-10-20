@@ -145,3 +145,52 @@ describe('listTasks —— 不泄露内部 key', () => {
     expect(found).not.toHaveProperty('key');
   });
 });
+
+/**
+ * 2026-10-20：target 字段 —— 前端据此知道「是哪一季在跑」。
+ *
+ * 这条判据直接决定 UI 会不会骗人：此前前端只知道"有任务在跑"，
+ * 于是每一季都渲染出同一份「生成中 48%」，4 个季看起来全在跑，
+ * 实际后端只有 1 个任务。用户被这个假象直接误导过。
+ *
+ * 锁两件事：
+ *  1. key 仍不出现在对外结构里（继续隐身，只给结构化 target）；
+ *  2. target 确实带得出资源 id —— 否则前端只能退化成"不敢显示"。
+ */
+describe('task target —— 告诉前端是哪一个资源在跑', () => {
+  it('arc-chapters 的任务，target 解析成 { type: "arc", id: arcId }', async () => {
+    const arcId = uniq('arc-1');
+    const id = runTask(`arc-chapters:${arcId}`, 'arc-chapters', async () => 'ok');
+    await tick();
+    const found = listTasks().find(t => t.id === id);
+    expect(found?.target).toEqual({ type: 'arc', id: arcId });
+    expect(found).not.toHaveProperty('key');
+  });
+
+  it('append-chapter 也归到 arc（前端同一套锁逻辑复用）', async () => {
+    const arcId = uniq('arc-2');
+    const id = runTask(`append-chapter:${arcId}`, 'append-chapter', async () => 'ok');
+    await tick();
+    expect(listTasks().find(t => t.id === id)?.target).toEqual({ type: 'arc', id: arcId });
+  });
+
+  it('replan-chapter 归到 chapter', async () => {
+    const chapterId = uniq('ch-1');
+    const id = runTask(`replan-chapter:${chapterId}`, 'replan-chapter', async () => 'ok');
+    await tick();
+    expect(listTasks().find(t => t.id === id)?.target).toEqual({ type: 'chapter', id: chapterId });
+  });
+
+  it('getTask 单查也带 target（轮询方同样需要知道在跑什么）', async () => {
+    const arcId = uniq('arc-3');
+    const id = runTask(`arc-chapters:${arcId}`, 'arc-chapters', async () => 'ok');
+    await tick();
+    expect(getTask(id)?.target).toEqual({ type: 'arc', id: arcId });
+  });
+
+  it('没有冒号或 id 为空的 key 不产生 target（而不是造一个假 id）', async () => {
+    const id = runTask(uniq('weird'), 'test', async () => 'ok');
+    await tick();
+    expect(listTasks().find(t => t.id === id)?.target).toBeUndefined();
+  });
+});

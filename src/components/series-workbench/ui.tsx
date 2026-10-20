@@ -4,12 +4,22 @@ import { extractReadableText } from './text';
 type CardStatus = 'pending' | 'in_progress' | 'done';
 
 function CardSection({
-  index, kicker, status, title, active, children,
+  index, kicker, status, title, badgeText, active, children,
 }: {
   index: string;
   kicker: string;
   status: CardStatus;
   title: string;
+  /**
+   * 2026-10-19：覆盖徽章文案，不改状态样式。
+   *
+   * 为什么需要：`status` 只有 pending / in_progress / done 三档，
+   * 而「季骨架已就绪、还没拆话」这个状态被迫塞进 `in_progress` → 显示「进行中」。
+   * 但那个时刻**没有任何任务在跑** —— 徽章在骗人，还直接把用户引向
+   * 「那按钮为什么还能点」的误解。给这个真实存在的第四种状态一个真实文案，
+   * 不再让状态位承担它讲不了的意思。
+   */
+  badgeText?: string;
   active?: boolean;
   children: React.ReactNode;
 }): React.ReactElement {
@@ -19,6 +29,7 @@ function CardSection({
       : status === 'in_progress'
       ? { text: '进行中', color: 'var(--paper)', bg: 'var(--accent)' }
       : { text: '未开始', color: 'var(--ink-3)', bg: 'transparent' };
+  const label = badgeText ?? badge.text;
 
   return (
     <section
@@ -41,7 +52,7 @@ function CardSection({
           padding: '0.25rem 0.625rem',
           border: status === 'pending' ? '1px solid var(--rule-soft)' : 'none',
         }}>
-          {badge.text}
+          {label}
         </span>
       </div>
       <div>{children}</div>

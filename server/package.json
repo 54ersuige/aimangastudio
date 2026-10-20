@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch index.ts",
+    "dev": "tsx watch --exclude data/** --exclude logs/** --exclude \"*.json\" --exclude \"*.jsonl\" index.ts",
     "start": "tsx index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.build.json && node scripts/postbuild.mjs"

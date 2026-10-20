@@ -267,6 +267,14 @@ export interface SeriesPage {
   characterIds: string[];
   status: PageStatus;
   errorMessage?: string;
+  /**
+   * 需要用户动手的提示（**不是错误**）——2026-10-20 新增。
+   *
+   * 典型场景：某一格的分镜描述太短（信息密度不够，画出来会失焦），
+   * 系统**不再替用户改写**，而是提示"这格建议你补充细节"。
+   * 与 errorMessage 分开：errorMessage 是"失败了"，hint 是"成功了但建议你再看一眼"。
+   */
+  hint?: string;
 }
 
 export interface Chapter {
@@ -351,6 +359,15 @@ export interface TaskState {
    * 2026-09-18 新增。
    */
   progress?: number;
+  /**
+   * 任务正在处理的资源（2026-10-20 新增）。
+   *
+   * 内部互斥键形如 `arc-chapters:<arcId>`，但 key 本身不对前端暴露
+   * （键格式属于实现细节，前端不该依赖它的解析规则）。
+   * 这里给的是**结构化**结果：前端据此知道该把进度条画在哪一季，
+   * 而不是"每季都显示同一份进度"。
+   */
+  target?: { type: 'arc' | 'chapter' | string; id: string };
 }
 
 // ========== 公众号图文草稿（第一阶段）==========
