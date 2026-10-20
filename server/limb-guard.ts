@@ -146,6 +146,40 @@ export async function callLimbAuditor(imageDataUrl: string): Promise<LimbAudit |
 }
 
 /**
+ * 性别判据：**主角在场即通过**。
+ *
+ * 2026-10-20 修。原来的判据是「画面里只要有任何一个 ≠ 预期性别的人就判不通过」，
+ * 于是「陆远(男) + 前台女职员」这种完全正确的画面被判成性别不符 → 触发整格重画。
+ * 实测一天：25 条判不通过全部是这类误报，造成 14 次无谓重画。
+ *
+ * 现在：主角必出场 —— 画面里**存在**预期性别即通过；
+ * 只有画面里一个预期性别的人都没有，才判不通过（那才是"主角真被画错"）。
+ */
+export function evaluateGenderObserved(
+  observed: Array<'female' | 'male' | 'ambiguous'>,
+  expectedGender: 'female' | 'male' | 'ambiguous',
+): { mismatch: boolean; mismatchIndices: number[]; reason: string } {
+  const hasExpected = observed.some(g => g === expectedGender);
+  if (hasExpected) {
+    return { mismatch: false, mismatchIndices: [], reason: '' };
+  }
+  // 一个预期性别的人都没有 → 主角很可能真被画错了
+  const mismatchIndices: number[] = [];
+  observed.forEach((g, i) => {
+    // ambiguous 不算"错"（判不出性别 ≠ 画错），但也不算"在场的预期性别"
+    if (g === 'ambiguous') return;
+    mismatchIndices.push(i);
+  });
+  return {
+    mismatch: mismatchIndices.length > 0,
+    mismatchIndices,
+    reason: mismatchIndices.length > 0
+      ? `画面中未出现预期性别的角色（预期 ${expectedGender}，实际画面人物：${observed.join('、') || '无'}）`
+      : '',
+  };
+}
+
+/**
  * 2026-09-07 引擎层 P3：性别一致性自检。
  *
  * 解决 boy_up 这种"主角是 male，模型却画成女性"的根因。
@@ -180,11 +214,26 @@ export async function checkGenderConsistency(
     '  - ambiguous: short hair on female-presenting face, or features that could go either way.',
     'Be conservative: if you can\'t tell, output "ambiguous" rather than guessing.',
     '',
+    // 2026-10-20：显式写「不要报什么」。
+    // 只写「要报什么」时，模型会把画面里每一个性别不同的人都算成"不符"——
+    // 实测一天 25 条判不通过，全部是「主角(男) + 女配角」这种完全正确的画面，
+    // 造成 14 次无谓重画。审图问句必须同时划定「这些不算问题」。
+    'IMPORTANT — what does NOT count as an error:',
+    '  - Other characters in the scene may be of ANY gender. A female bystander,',
+    '    a female colleague, a male manager — none of these are errors.',
+    '  - Only the MAIN character matters. The main character is the one whose',
+    '    expected gender is stated below. If at least one figure matches that',
+    '    expected gender, the panel is CORRECT.',
+    '  - Do not report a mismatch merely because some other figure differs.',
+    '  - Do not report hairstyle, clothing, age, or build as gender mismatches.',
+    '',
     'Return strict JSON:',
     '  observed: array of strings, each "female"/"male"/"ambiguous", in left-to-right order.',
     '  confidence: number 0..1 (how confident you are in the overall assessment).',
   ].join('\n');
-  const userText = `Audit this image. Expected dominant gender: ${expectedGender}. Report observed genders of all visible figures.`;
+  const userText = `Audit this image. Expected gender of the MAIN character: ${expectedGender}. `
+    + `Other figures may be of any gender and that is not an error. `
+    + `Report the visible gender of all figures, and make sure the main character is among them.`;
   try {
     const provider = getTextProvider({ provider: cfg.provider as any });
     const resp = await provider.generateText(cfg as any, {
@@ -208,19 +257,24 @@ export async function checkGenderConsistency(
         return 'ambiguous' as const;
       });
     const mismatchIndices: number[] = [];
-    observed.forEach((g: 'female' | 'male' | 'ambiguous', i: number) => {
-      // ambiguous 视为通过 —— 不误判中性角色
-      if (g === 'ambiguous') return;
-      if (g !== expectedGender) mismatchIndices.push(i);
-    });
+    // 2026-10-20：**判据从"画面里有没有别人"改成"主角在不在场"**。
+    //
+    // 原判据：observed 里只要有任何一个 ≠ expectedGender 就算不通过。
+    // 于是「陆远（男）+ 前台女职员」这种完全正确的画面被判成
+    // 「性别不符」→ 触发整格重画 → 白烧钱。
+    // 2026-10-20 实测一天：25 条判不通过，**全部是这类误报**，
+    // 造成 14 次无谓重画（其中 13 次纯粹是 gender 误报触发）。
+    //
+    // 新判据：**主角必出场** —— 画面里存在预期性别就说明主角画对了。
+    // 只有当画面里**一个预期性别的人都没有**时，才判不通过
+    // （这才是"主角真被画成女性"的情形）。
+    const verdict = evaluateGenderObserved(observed, expectedGender);
     return {
       observedGenders: observed,
       expectedGender,
-      mismatch: mismatchIndices.length > 0,
-      mismatchIndices,
-      reason: mismatchIndices.length > 0
-        ? `图中有 ${mismatchIndices.length} 个人物性别与预期不符（预期 ${expectedGender}）`
-        : '',
+      mismatch: verdict.mismatch,
+      mismatchIndices: verdict.mismatchIndices,
+      reason: verdict.reason,
       confidence: typeof p.confidence === 'number' ? Math.max(0, Math.min(1, p.confidence)) : 0.5,
     };
   } catch (e: any) {
