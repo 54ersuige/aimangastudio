@@ -152,7 +152,7 @@ describe('judgePanel —— 判定规则与拆分版一致', () => {
     // 这正是实跑里烧满 3 次重试的那一格：只缺「双手握着背包肩带」。
     const g: PanelGateResult = {
       ...okGate,
-      alignment: { ok: true, items: ['a', 'b', 'c'], missing: [], reason: '', confidence: 0.67 },
+      alignment: { ok: true, items: ['a', 'b', 'c'], missing: [], criticalMissing: [], reason: '', confidence: 0.67 },
     };
     expect(judgePanel(g, { alignmentItems: ['a', 'b', 'c'] }).ok).toBe(true);
   });
@@ -160,7 +160,7 @@ describe('judgePanel —— 判定规则与拆分版一致', () => {
   it('对齐：过半没画出来 → 才不通过', () => {
     const g: PanelGateResult = {
       ...okGate,
-      alignment: { ok: false, items: ['a', 'b', 'c', 'd'], missing: ['c', 'd'], reason: '缺：c、d', confidence: 0.5 },
+      alignment: { ok: false, items: ['a', 'b', 'c', 'd'], missing: ['c', 'd'], criticalMissing: ['c', 'd'], reason: '缺：c、d', confidence: 0.5 },
     };
     expect(judgePanel(g, { alignmentItems: ['a', 'b', 'c', 'd'] }).ok).toBe(false);
   });
@@ -168,7 +168,7 @@ describe('judgePanel —— 判定规则与拆分版一致', () => {
   it('alignment 缺一项 → 不通过；无清单时 alignment 判定被跳过', () => {
     const missingGate = {
       ...okGate,
-      alignment: { ok: false, items: ['a', 'b'], missing: ['b'], reason: '缺：b', confidence: 0.5 },
+      alignment: { ok: false, items: ['a', 'b'], missing: ['b'], criticalMissing: ['b'], reason: '缺：b', confidence: 0.5 },
     } as PanelGateResult;
     expect(judgePanel(missingGate, { alignmentItems: ['a', 'b'] }).ok).toBe(false);
     // 没有清单 → alignment 不参与判定（否则会拿一个必然为空的 mismatch 卡住出图）
@@ -180,7 +180,7 @@ describe('judgePanel —— 判定规则与拆分版一致', () => {
       ...okGate,
       limb: limbAudit(),
       review: review(50),
-      alignment: { ok: false, items: ['a'], missing: ['a'], reason: '缺：a', confidence: 0.3 },
+      alignment: { ok: false, items: ['a'], missing: ['a'], criticalMissing: ['a'], reason: '缺：a', confidence: 0.3 },
     };
     const v = judgePanel(g, { alignmentItems: ['a'] });
     expect(v.ok).toBe(false);
@@ -228,7 +228,7 @@ describe('gateToAuditFields —— 审计字段必须每轮全覆盖', () => {
       dimensions: {} as any, overall: 55, topIssue: '人物走形',
       verdict: 'reject', confidence: 0.8,
     },
-    alignment: { ok: false, items: ['a'], missing: ['a'], reason: '缺：a', confidence: 0.4 },
+    alignment: { ok: false, items: ['a'], missing: ['a'], criticalMissing: ['a'], reason: '缺：a', confidence: 0.4 },
   };
 
   it('四闸全 null → 四个字段全 null', () => {

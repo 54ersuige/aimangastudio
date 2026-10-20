@@ -1514,6 +1514,7 @@ async function generateOnePanelImage(args: GenerateOnePanelArgs): Promise<string
         ok: alignmentResult.ok,
         items: alignmentItems ?? [],
         missing: alignmentResult.missing,
+        criticalMissing: alignmentResult.criticalMissing,
         reason: alignmentResult.reason,
         confidence: alignmentResult.confidence,
       }

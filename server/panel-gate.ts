@@ -160,7 +160,8 @@ function writeCache(key: string, result: Omit<PanelGateResult, 'cached'>): void 
 
 // ── prompt ────────────────────────────────────────────────────────────────
 
-function buildSystemInstruction(): string {
+/** 2026-10-20 导出：让测试能直接锁住「分级规则写进 prompt 了」这件事。 */
+export function buildSystemInstruction(): string {
   return [
     'You are the senior editor of a prestige comic magazine (Shueisha / New Yorker / Le Journal)',
     'AND its anatomy & continuity inspector, reviewing ONE comic panel image.',
@@ -192,7 +193,33 @@ function buildSystemInstruction(): string {
     '  - present=false ONLY if clearly absent or clearly depicted wrongly.',
     '  - NEVER mark missing because of art style, perspective, small size, or lighting.',
     '  - NEVER invent elements that are not on the checklist.',
-    'Output "alignment": { "results": [{ "text": str, "present": bool, "reason": str }] }',
+    '',
+    // 2026-10-20：把"缺了"再分成"大问题"和"细节" —— 只有大的才值得重画一次。
+    'SEVERITY — classify every present=false item:',
+    '  severity="critical" (a REAL problem worth redrawing the whole panel):',
+    '    - a person who must be in this panel is entirely absent;',
+    '    - a key story prop is entirely absent (the cup, the torn document, the key);',
+    '    - the depicted action contradicts the description (sitting vs standing,',
+    '      tearing the sheet vs handing it over);',
+    '    - the number of people is wrong (three drawn where one is described).',
+    '  severity="minor" (do NOT redraw for this — it is not worth the cost):',
+    '    - the element is there but a secondary detail differs (a reflection, a',
+    '      highlight, a tint, a slightly different angle, a minor accessory);',
+    '    - the element is drawn but less prominent, smaller, or less detailed than',
+    '      the description implies;',
+    '    - a supporting background element is missing (a screen, a doorframe, a',
+    '      second cup) while the main subject and main action are correct.',
+    '',
+    'IMPORTANT — these are NOT critical, do not mark them critical:',
+    '  - a missing reflection / highlight / sheen / gloss / glint',
+    '  - a missing colour nuance, shading, or texture',
+    '  - a small pose or finger-position nuance',
+    '  - the subject placed slightly differently than described',
+    '  - a facial micro-expression, gaze direction, or subtle body tension',
+    '  - any element that IS visible but not described with equal detail.',
+    '  When in doubt, choose "minor". A wrong "critical" costs a full redraw.',
+    '',
+    'Output "alignment": { "results": [{ "text": str, "present": bool, "reason": str, "severity": "critical"|"minor" }] }',
     'reason is one short clause (max 20 chars), only when present=false.',
     'Omit this block entirely if no checklist was supplied.',
     '',
@@ -209,7 +236,7 @@ function buildSystemInstruction(): string {
     '{',
     '  "limb":  { "abnormal": boolean, "reason": string, "confidence": number, "regions": [...] },',
     '  "gender": { "observed": [string], "confidence": number },',
-    '  "alignment": { "results": [ { "text": string, "present": boolean, "reason": string } ] },',
+    '  "alignment": { "results": [ { "text": string, "present": boolean, "reason": string, "severity": "critical"|"minor" } ] },',
     '  "dimensions": {',
     '    "D1_character_consistency": { "score": number, "reason": string },',
     '    "D2_cinematography":        { "score": number, "reason": string },',
@@ -332,22 +359,64 @@ function parseGender(p: any, expected: 'female' | 'male' | 'ambiguous'): GenderA
   };
 }
 
+/**
+ * 图文对齐的分级判据：**只有 critical 缺失才不达标**。
+ *
+ * 2026-10-20 新增。旧判据是「呈现率 ≥ 60%」（isAlignmentAcceptable），
+ * 问题在于呈现率**分不出大小** —— 抽 5 项、画对 4 项（其中 1 项是"缺反光"）
+ * 照样判不通过 → 整格重画。
+ *
+ * 2026-10-20 实测一天：32 条触发重画，逐条看下来绝大多数是**细节级**缺失
+ * （反光 / 泛白 / 微表情 / 位置偏差 / 次要背景物），画面其实是对的。
+ *
+ * 有 severity 字段 → 按 severity 判（只有 critical 才拦）；
+ * 老数据没有 → 退回呈现率判据（向后兼容）。
+ */
+export function evaluateAlignmentResults(
+  results: Array<{ text: string; present: boolean; reason?: string; severity?: 'critical' | 'minor' }>,
+): { ok: boolean; missing: string[]; criticalMissing: string[]; reason: string } {
+  const missing = results
+    .filter(r => r && r.present !== true)
+    .map(r => String(r.text || '').trim())
+    .filter(Boolean);
+  const hasSeverity = results.some(r => r && (r.severity === 'critical' || r.severity === 'minor'));
+  if (!hasSeverity) {
+    const presentCount = results.filter(r => r && r.present === true).length;
+    const ok = isAlignmentAcceptable(presentCount, results.length);
+    return {
+      ok,
+      missing: ok ? [] : missing,
+      criticalMissing: [],
+      reason: ok ? '' : `缺：${missing.slice(0, 3).join('、')}`,
+    };
+  }
+  const criticalMissing = results
+    .filter(r => r && r.present !== true && r.severity === 'critical')
+    .map(r => String(r.text || '').trim())
+    .filter(Boolean);
+  const ok = criticalMissing.length === 0;
+  const reasonItems = criticalMissing.length > 0 ? criticalMissing : missing;
+  return {
+    ok,
+    missing: ok ? [] : reasonItems,
+    criticalMissing: ok ? [] : criticalMissing,
+    reason: ok ? '' : `缺：${reasonItems.slice(0, 3).join('、')}`,
+  };
+}
+
 function parseAlignment(p: any, items: string[]): AlignmentAudit | null {
   const a = p?.alignment;
   if (!a || !Array.isArray(a.results) || a.results.length === 0) return null;
   const present = a.results.filter((r: any) => r && r.present === true);
-  const missing = a.results
-    .filter((r: any) => r && r.present !== true)
-    .map((r: any) => String(r.text || '').trim())
-    .filter(Boolean);
-  const ok = isAlignmentAcceptable(present.length, a.results.length);
+  const verdict = evaluateAlignmentResults(a.results);
   return {
-    ok,
+    ok: verdict.ok,
     items,
     // 只在真的不达标时才记缺失项：达标但漏了一两个是正常的，
     // 全量塞进审计只会让人以为出了大问题。
-    missing: ok ? [] : missing,
-    reason: ok ? '' : `缺：${missing.slice(0, 3).join('、')}`,
+    missing: verdict.missing,
+    criticalMissing: verdict.criticalMissing,
+    reason: verdict.reason,
     confidence: a.results.length > 0 ? clamp01(present.length / a.results.length) : 0,
   };
 }
@@ -546,7 +615,7 @@ export function judgePanel(
   const alignmentOk = !opts.alignmentItems || opts.alignmentItems.length === 0
     || gate.alignment == null
     || gate.alignment.ok;
-  if (!alignmentOk && gate.alignment && gate.alignment.missing.length > 0) {
+  if (!alignmentOk && gate.alignment && gate.alignment.criticalMissing.length > 0) {
     reasons.push(`alignment: ${gate.alignment.reason}`);
   }
 
@@ -596,6 +665,8 @@ export interface GateAuditFields {
     ok: boolean;
     items: string[];
     missing: string[];
+    /** 只含"大问题"的缺失项 —— 只有这些会触发重画（2026-10-20）。 */
+    criticalMissing: string[];
     reason: string;
     confidence: number;
   } | null;
@@ -652,6 +723,7 @@ export function gateToAuditFields(
         ok: gate.alignment.ok,
         items: alignmentItems ?? gate.alignment.items,
         missing: gate.alignment.missing,
+        criticalMissing: gate.alignment.criticalMissing,
         reason: gate.alignment.reason,
         confidence: gate.alignment.confidence,
       }

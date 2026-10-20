@@ -64,9 +64,10 @@ export interface PanelAuditRecord {
   } | null;
   /** 图文对齐门禁结果（2026-09-11）。null 表示未启用 / 抽取或核验失败（视作通过）。 */
   alignmentAudit?: {
-    ok: boolean;                           // 全部可核验要素都画出来了
+    ok: boolean;                           // 全部「大问题」都画出来了
     items: string[];                       // 抽取的核验清单
     missing: string[];                     // 出图中缺失/画错的要素
+    criticalMissing?: string[];            // 只含「大问题」的缺失项 —— 只有这些会触发重画
     reason: string;                        // 一句汇总
     confidence: number;
   } | null;
