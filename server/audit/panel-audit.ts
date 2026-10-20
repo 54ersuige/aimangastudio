@@ -71,6 +71,15 @@ export interface PanelAuditRecord {
     reason: string;                        // 一句汇总
     confidence: number;
   } | null;
+  /**
+   * 画面内可读文字检查（2026-10-20 新增第五道闸）。
+   * hasReadableText=true = 画面里出现了可读文字或伪汉字乱码（失败品）。
+   */
+  textInImage?: {
+    hasReadableText: boolean;
+    reason: string;
+    confidence: number;
+  } | null;
   /** 本次任务第几次尝试成功的（1 表示首张就过）。 */
   attempt: number;
   /** 重生成累计尝试次数（含失败）。 */

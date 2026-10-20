@@ -90,8 +90,25 @@ export interface PanelGateResult {
   gender: GenderAudit | null;
   review: PanelReview | null;
   alignment: AlignmentAudit | null;
+  /**
+   * 画面里有没有可读文字（含伪汉字乱码）——2026-10-20 新增。
+   *
+   * 之前这个检查**根本不存在**：只有 prompt 里"叫模型别写字"、描述清洗、
+   * DNA 里的一句约束（全是预防），出图真出了字没人查。
+   * 2026-10-20 实测抓到一格屏幕上的伪汉字（"跛剃流搬己治云"）—— 漫画里
+   * 出现乱码是最扎眼的硬伤之一，却一路无人拦下。
+   */
+  textInImage: TextInImageAudit | null;
   /** 本次结果是否来自缓存（true = 没花钱）。 */
   cached: boolean;
+}
+
+/** 画面内可读文字检查结果。 */
+export interface TextInImageAudit {
+  /** true = 画面里出现了可读文字或伪汉字（失败品）。 */
+  hasReadableText: boolean;
+  reason: string;
+  confidence: number;
 }
 
 // ── 缓存 ──────────────────────────────────────────────────────────────────
@@ -223,8 +240,28 @@ export function buildSystemInstruction(): string {
     'reason is one short clause (max 20 chars), only when present=false.',
     'Omit this block entirely if no checklist was supplied.',
     '',
-    '=== CHECK 4: EDITORIAL SCORING (8 dimensions) ===',
-    'Each dimension is 0..10 (10 = meets professional publication standard):',
+    '=== CHECK 5: READABLE TEXT IN IMAGE ===',
+    'This magazine never prints readable text inside a panel. Screens, signage,',
+    'posters, books, documents, product labels, clothing prints, licence plates —',
+    'all must be blank, blurred, or reduced to abstract marks.',
+    '',
+    'Report whether the image contains ANY readable characters:',
+    '  - real Chinese/Japanese/Latin words or sentences → hasReadableText = true',
+    '  - GIBBERISH that imitates characters (fake strokes that look like',
+    '    "跛剃流搬" or scrambled pseudo-Chinese) → hasReadableText = true',
+    '    (this is a FAILURE, even though no real word is present)',
+    '  - abstract strokes, scribbles, blurred smudges, non-character shapes → false',
+    '  - a signature-like flourish with no legible characters → false',
+    '',
+    'IMPORTANT — do NOT report as text:',
+    '  - panel borders, speech-bubble outlines without content, speed lines;',
+    '  - patterns, hatching, or decorative marks that do not form characters;',
+    '  - text that is too small/blurred to read as characters.',
+    'When in doubt, report false. Only flag characters that are actually legible',
+    'or clearly imitate characters.',
+    'Output "textInImage": { "hasReadableText": bool, "reason": str, "confidence": 0..1 }',
+    '',
+    '=== CHECK 4: EDITORIAL SCORING (8 dimensions) ===',    'Each dimension is 0..10 (10 = meets professional publication standard):',
     '  8 = publishable with light touch-ups; 6 = solid amateur work;',
     '  4 = needs revision; 2 = amateur mistakes; 0 = unacceptable.',
     '  reason MUST be ONE concise Chinese sentence (<= 40 chars) explaining pass/fail.',
@@ -237,6 +274,7 @@ export function buildSystemInstruction(): string {
     '  "limb":  { "abnormal": boolean, "reason": string, "confidence": number, "regions": [...] },',
     '  "gender": { "observed": [string], "confidence": number },',
     '  "alignment": { "results": [ { "text": string, "present": boolean, "reason": string, "severity": "critical"|"minor" } ] },',
+    '  "textInImage": { "hasReadableText": boolean, "reason": string, "confidence": number },',
     '  "dimensions": {',
     '    "D1_character_consistency": { "score": number, "reason": string },',
     '    "D2_cinematography":        { "score": number, "reason": string },',
@@ -404,6 +442,16 @@ export function evaluateAlignmentResults(
   };
 }
 
+function parseTextInImage(p: any): TextInImageAudit | null {
+  const t = p?.textInImage;
+  if (!t || typeof t.hasReadableText !== 'boolean') return null;
+  return {
+    hasReadableText: t.hasReadableText === true,
+    reason: String(t.reason || '').trim(),
+    confidence: typeof t.confidence === 'number' ? clamp01(t.confidence) : 0.5,
+  };
+}
+
 function parseAlignment(p: any, items: string[]): AlignmentAudit | null {
   const a = p?.alignment;
   if (!a || !Array.isArray(a.results) || a.results.length === 0) return null;
@@ -506,7 +554,7 @@ function parseReview(
  */
 export async function runPanelGate(input: PanelGateInput): Promise<PanelGateResult> {
   const cfg = getConfig().vision;
-  const disabled: PanelGateResult = { limb: null, gender: null, review: null, alignment: null, cached: false };
+  const disabled: PanelGateResult = { limb: null, gender: null, review: null, alignment: null, textInImage: null, cached: false };
   if (!cfg.enabled) return disabled;
   if (!cfg.apiKey || !cfg.baseUrl) {
     logGeneration('panel-gate-skip', { reason: 'vision apiKey/baseUrl 未配置' });
@@ -564,8 +612,11 @@ export async function runPanelGate(input: PanelGateInput): Promise<PanelGateResu
       alignment: input.alignmentItems && input.alignmentItems.length > 0
         ? parseAlignment(p, input.alignmentItems)
         : null,
+      // 2026-10-20：画面内可读文字检查（新增第五道闸）。
+      // 复用同一次 vision 调用，不增加任何调用成本。
+      textInImage: parseTextInImage(p),
     };
-    if (!result.limb && !result.gender && !result.review && !result.alignment) {
+    if (!result.limb && !result.gender && !result.review && !result.alignment && !result.textInImage) {
       // 一次都没解析出来 —— 说明模型返回的结构整体不对，静默视作通过会掩盖问题。
       logGeneration('panel-gate-all-blocks-unparsed', { rawHead: txt.slice(0, 300) });
       console.warn('[panel-gate] 四块结果全部解析失败（结构可能已变），本次视作通过');
@@ -619,6 +670,13 @@ export function judgePanel(
     reasons.push(`alignment: ${gate.alignment.reason}`);
   }
 
+  // 2026-10-20：画面内出现可读文字（含伪汉字）→ 不通过，重画。
+  // 这是**大问题**：漫画里出现乱码是最扎眼的硬伤，而此前根本没人查。
+  const textOk = !gate.textInImage || !gate.textInImage.hasReadableText;
+  if (!textOk && gate.textInImage) {
+    reasons.push(`text: ${gate.textInImage.reason || '画面内出现可读文字'}`);
+  }
+
   return { ok: reasons.length === 0, reasons };
 }
 
@@ -667,6 +725,12 @@ export interface GateAuditFields {
     missing: string[];
     /** 只含"大问题"的缺失项 —— 只有这些会触发重画（2026-10-20）。 */
     criticalMissing: string[];
+    reason: string;
+    confidence: number;
+  } | null;
+  /** 画面内可读文字检查（2026-10-20 新增第五道闸）。 */
+  textInImage: {
+    hasReadableText: boolean;
     reason: string;
     confidence: number;
   } | null;
@@ -726,6 +790,13 @@ export function gateToAuditFields(
         criticalMissing: gate.alignment.criticalMissing,
         reason: gate.alignment.reason,
         confidence: gate.alignment.confidence,
+      }
+      : null,
+    textInImage: gate.textInImage
+      ? {
+        hasReadableText: gate.textInImage.hasReadableText,
+        reason: gate.textInImage.reason,
+        confidence: gate.textInImage.confidence,
       }
       : null,
   };

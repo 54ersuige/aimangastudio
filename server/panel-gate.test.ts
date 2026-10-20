@@ -92,7 +92,7 @@ describe('buildGateKey', () => {
 });
 
 describe('judgePanel —— 判定规则与拆分版一致', () => {
-  const okGate: PanelGateResult = { limb: null, gender: null, review: null, alignment: null, cached: false };
+  const okGate: PanelGateResult = { limb: null, gender: null, review: null, alignment: null, textInImage: null, cached: false };
 
   function limbAudit(patch: Partial<LimbAudit> = {}): LimbAudit {
     return {
@@ -190,7 +190,7 @@ describe('judgePanel —— 判定规则与拆分版一致', () => {
 });
 
 describe('needsLimbRepair', () => {
-  const okGate: PanelGateResult = { limb: null, gender: null, review: null, alignment: null, cached: false };
+  const okGate: PanelGateResult = { limb: null, gender: null, review: null, alignment: null, textInImage: null, cached: false };
   const withRegions: LimbAudit = {
     people: 1, hands: 2, arms: 2, abnormal: true, reason: '多一条手臂',
     regions: [{ x: 0.4, y: 0.4, w: 0.1, h: 0.1, label: 'arm' }],
@@ -215,7 +215,7 @@ describe('needsLimbRepair', () => {
 });
 
 describe('gateToAuditFields —— 审计字段必须每轮全覆盖', () => {
-  const empty: PanelGateResult = { limb: null, gender: null, review: null, alignment: null, cached: false };
+  const empty: PanelGateResult = { limb: null, gender: null, review: null, alignment: null, textInImage: null, cached: false };
 
   const dirtyGate: PanelGateResult = {
     ...empty,
