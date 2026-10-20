@@ -596,6 +596,11 @@ export function buildPanelImagePrompt(opts: {
   charDescLines: string[];
   /** 角色名列表，与 charDescLines / refImages 一一对应。 */
   boundCharNames: string[];
+  /**
+   * 角色性别中文全称清单（2026-10-20），如 "田经理＝男"。
+   * 放在 prompt 尾部压住描述里可能写错的代词。
+   */
+  genderLines?: string[];
   anchorText: string;
   extraCharacters?: { name: string; appearance: string }[];
 }): string {
@@ -625,9 +630,19 @@ export function buildPanelImagePrompt(opts: {
   // 2026-09-01 新增（v2 紧凑版）：把"出场人物的性别年龄段必须匹配"压成一行短 token，
   // 避免分镜 prompt 长度被中文长描述推高。注意 buildCharacterDescLine 已包含性别/年龄，
   // 这里只是兜底钉一次，避免参考图脸错了分镜也错。
-  const genderHintText = opts.boundCharNames.length > 0
-    ? `\nGender/Age must match each character's data above. Ethnicity: East Asian Chinese faces for all characters (follow the reference sheets); never draw Western/Caucasian facial features.`
-    : '';
+  //
+  // 2026-10-20：改成**中文全称清单 + 冲突时以清单为准**。
+  //   实测：田经理角色卡是 male，但某格描述写成「她站在陆远工位」，
+  //   模型跟了描述里的「她」，把男角色画成了女性。
+  //   英文 F/M token 压不住中文代词，中文全称清单 + 明确优先级才有效。
+  //   放在 prompt 尾部 —— 注意力最高位。
+  const genderHintText = opts.genderLines && opts.genderLines.length > 0
+    ? `\n【性别硬约束】${opts.genderLines.join('、')}。画面中这些角色的性别必须与本清单一致；` +
+      `若「画面内容」描述里出现的代词（他/她）与本清单矛盾，**一律以本清单为准**。` +
+      `Ethnicity: East Asian Chinese faces for all characters (follow the reference sheets); never draw Western/Caucasian facial features.`
+    : (opts.boundCharNames.length > 0
+      ? `\nGender/Age must match each character's data above. Ethnicity: East Asian Chinese faces for all characters (follow the reference sheets); never draw Western/Caucasian facial features.`
+      : '');
   // 2026-08-31 复盘：纯场景格（无人物）+ 玻璃幕墙/晨光反射类描述会把模型拽进摄影分布，
   // 整张输出成实景照片（负面表已补 photograph/photorealistic，这里再加正向硬约束双保险）。
   //
@@ -688,18 +703,28 @@ function buildPanelCorrectionText(issues: {
 export function collectPanelCharacterRefs(
   series: Series,
   panel: Pick<Panel, 'characterIds' | 'camera'>,
-): { refImages: { data: string; mimeType: string }[]; charDescLines: string[]; boundCharNames: string[]; anchorText: string } {
+): { refImages: { data: string; mimeType: string }[]; charDescLines: string[]; boundCharNames: string[]; anchorText: string; genderLines: string[] } {
   const charMap = new Map(series.characters.map(c => [c.id, c]));
   const refImages: { data: string; mimeType: string }[] = [];
   const charDescLines: string[] = [];
   const boundCharNames: string[] = [];
   const anchorLines: string[] = [];
+  const genderLines: string[] = [];
   const shot = pickReferenceShotForPanel(panel.camera);
   for (const charId of panel.characterIds) {
     const c = charMap.get(charId);
     if (!c) continue;
     charDescLines.push(buildCharacterDescLine(c));
     boundCharNames.push(c.name);
+    // 2026-10-20：性别**中文全称**清单（放到 prompt 尾部用）。
+    // 为什么不用 buildCharacterDescLine 里那个 F/M 英文 token：
+    //   描述里写的是中文「她」，模型看到「田经理: M」和「她站在」时
+    //   会跟更具体的场景描述走 —— 实测第 3 季把 male 的田经理画成了女性。
+    //   中文全称 + 「代词以本清单为准」放在尾部（注意力最高位）才压得住。
+    if (c.gender) {
+      const gCn: Record<string, string> = { female: '女', male: '男', ambiguous: '性别不明确', nonbinary: '性别不明确' };
+      genderLines.push(`${c.name}＝${gCn[c.gender] || '性别不明确'}`);
+    }
     // 强制把每个出场角色的 visualAnchors（高辨识度物理特征）带入 prompt，
     // 解决「几十页后角色换脸」的问题。这是「形象一致性」的核心。
     const anchors = c.visualAnchors ?? [];
@@ -709,7 +734,7 @@ export function collectPanelCharacterRefs(
     if (data) refImages.push({ data, mimeType: 'image/png' });
   }
   const anchorText = anchorLines.length > 0 ? `\n视觉锚点（一致性约束）：\n${anchorLines.join('\n')}` : '';
-  return { refImages, charDescLines, boundCharNames, anchorText };
+  return { refImages, charDescLines, boundCharNames, anchorText, genderLines };
 }
 
 /**
@@ -825,6 +850,29 @@ export function adoptExtended(
   const ext = (extended || '').trim();
   if (!ext) return null;
   return ext.length >= minLength ? ext : null;
+}
+
+/**
+ * 清洗分镜描述里混进来的**角色 ID**（2026-10-20）。
+ *
+ * 事故现场：拆解 schema 要求模型输出 `characterIds`（内部编号），
+ * 模型于是顺手把编号也写进了 description —— 出现
+ * 「田经理（27ce402a）手持一份文件」「陆远（7245a507，白衬衫）」这种
+ * 读者看不懂、出图时纯属噪音的东西。
+ *
+ * prompt 里已经写了"严禁写 ID"，但模型不一定听话 —— 所以**后处理兜底**。
+ * 只删括号里那一段 id，不动其它文字。
+ */
+export function stripCharacterIds(text: string): string {
+  if (!text) return text;
+  return text
+    // （27ce402a）/（27ce402a，深藏青西装三件套）/ (27ce402a)
+    .replace(/[（(]\s*[0-9a-f]{8,}[0-9a-f-]*\s*(?:[，,][^）)]{0,40})?\s*[）)]/gi, '')
+    // 裸露的 id（前面没有括号）："田经理 27ce402a 站在"
+    .replace(/\s[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\s/g, ' ')
+    .replace(/\s[0-9a-f]{8,}\s/g, ' ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
 }
 
 export async function repairShortDescriptionsWithRetry(
@@ -1207,7 +1255,7 @@ interface GenerateOnePanelArgs {
  */
 async function generateOnePanelImage(args: GenerateOnePanelArgs): Promise<string> {
   const { series, sceneDescription, panel, logCtx, dnaKey, config, imageProvider, style, mood } = args;
-  const { refImages, charDescLines, boundCharNames, anchorText } = collectPanelCharacterRefs(series, panel);
+  const { refImages, charDescLines, boundCharNames, anchorText, genderLines } = collectPanelCharacterRefs(series, panel);
   const styleRefs = getStyleRefs(dnaKey);
   const prompt = buildPanelImagePrompt({
     style,
@@ -1216,6 +1264,7 @@ async function generateOnePanelImage(args: GenerateOnePanelArgs): Promise<string
     description: panel.description,
     charDescLines,
     boundCharNames,
+    genderLines,
     anchorText,
     extraCharacters: panel.extraCharacters,
   }) + styleRefs.note;

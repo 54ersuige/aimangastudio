@@ -8,7 +8,7 @@ import { deleteStoredImage, isStoredImagePath, saveDataUrlImage } from '../image
 import { getSeries, updatePage, replacePanels, insertPanel, deletePanel } from '../series-store.js';
 import type { Chapter, SeriesPage } from '../series-store.js';
 import { callStructuredJson, seriesDnaKey, findPage, sanitizePanels, iterAllChapters, PanelBreakdownZ, PanelRewriteZ, getImageProvider } from './helpers.js';
-import { collectPanelCharacterRefs, generatePanelImages, describePanelFailures, buildPanelImagePrompt, buildRecentContext, getStyleRefs } from './prompts.js';
+import { collectPanelCharacterRefs, generatePanelImages, describePanelFailures, buildPanelImagePrompt, buildRecentContext, getStyleRefs, stripCharacterIds } from './prompts.js';
 
 const router = Router();
 
@@ -99,11 +99,32 @@ router.post('/series/:id/pages/:pageId/breakdown', async (req, res) => {
     const recentContext = buildRecentContext(series, targetPage.id, false, 3);
     // 角色库只给"名字 + 定位 + 一句话核心外貌"，完整外貌在出图阶段才需要。
     // 此前把整段 appearance 塞进 breakdown prompt，既撑长上下文又稀释模型对分镜规则的注意力。
+    //
+    // 2026-10-20 补上**性别/年龄段/服装**。
+    // 之前这里只给 id+名字+定位+40 字简介，**一个性别字都没有** ——
+    // 于是模型不知道"田经理"是男是女，写描述时自由发挥（实测把 male 写成"她"），
+    // 出图时 i2i 参考图又因 503 不可用，模型只能靠这句"她" →
+    // 同一个角色跨季性别漂移（第2季男、第3季女）。
+    // 服装同理：不给锚点，模型就自己发明。
+    const GENDER_CN: Record<string, string> = { female: '女', male: '男', ambiguous: '性别不明确', nonbinary: '性别不明确' };
+    const AGE_CN: Record<string, string> = {
+      child: '小孩', teen: '少年', young_adult: '青年', middle_aged: '中年', elder: '老年',
+    };
     const charLib = series.characters.map(c => {
       const brief = (c.roleInStory || c.description || c.appearance || '').replace(/\s+/g, ' ').slice(0, 40);
-      return `- id=${c.id} 名字=${c.name}（${c.role}）：${brief}`;
+      const g = c.gender ? (GENDER_CN[c.gender] || '性别不明确') : '';
+      const a = c.ageBand ? (AGE_CN[c.ageBand] || '') : '';
+      // 服装 + 视觉锚点：出图阶段的唯一事实源，这里先给模型一份
+      const look = [c.outfit, (c.visualAnchors ?? []).slice(0, 3).join('、')].filter(Boolean).join('；').slice(0, 60);
+      const tags = [g, a].filter(Boolean).join('·');
+      return `- id=${c.id} 名字=${c.name}（${c.role}${tags ? '，' + tags : ''}）`
+        + `${look ? ' 外观：' + look : ''}${brief ? ' 定位：' + brief : ''}`;
     }).join('\n');
-    const prompt = `为以下漫画批次拆出恰好 6 个分镜（每批固定 6 格）。\n\n系列：${series.title}\n世界观：${series.worldview?.era} / ${series.worldview?.artStyle}\n所属话：《${targetChapter.title}》 - ${targetChapter.summary}\n\n角色库（主要角色）：\n${charLib}\n\n前文剧情（保持连续，不要重复已发生的情节）：\n${recentContext}\n\n当前批次：第 ${targetPage.pageNumber} 批（属于"${targetChapter.title}"这一话）\n\n【2026-09-03 图下方文字三件套 · 必须严格输出】\n每格除了 description（出图用）+ dialogue（对白 ≤15 字）外，必须额外输出两个字段 —— 缺一个就读不懂这格漫画。\n- narration（20-80 字）=【作者】的声音，交代场景/时间/原因/走向；本批 6 格中至少 2-4 格要有；首格必须有；情绪转折时必须有。**严禁与 description 重复**（不要复述画面已经在做的事）。**严禁填"无"/"省略"等占位词**（要填就写一段真叙述；不要就空串）。\n- innerThought（0-50 字）=【主角】的内心独白；本批 6 格中至少 0-2 格要有；只在"主角选择/迷茫/觉醒/重要发现"的瞬间用，**用第一称**（如"我意识到…""我不明白…""这就是…"）。\n- narration 和 innerThought 都允许空串。空串表示"这格不需要额外的文字层"，前端不会显示空块。**严禁用占位词填充**。\n\n请把这一批拆成恰好 6 个分镜。${STORYBOARD_RULES}\n\n核心要求：每个分镜的 dialogue 是"读者在画面上看到的文字"（1 句，≤15 字），description 是"镜头里正在发生的事"（画面本身）。两者必须互相解释、指向同一件事、同一个焦点 —— dialogue 必须能在 description 的画面里找到"它是谁说的/对着哪个物件说的/看着哪里说的"。禁止画面在演 A、旁白在讲 B。写 description 时先想清这一格的"一念"是什么（人物/情绪/动作），再让 dialogue 和道具共同强化它。`;
+    const prompt = `为以下漫画批次拆出恰好 6 个分镜（每批固定 6 格）。\n\n系列：${series.title}\n世界观：${series.worldview?.era} / ${series.worldview?.artStyle}\n所属话：《${targetChapter.title}》 - ${targetChapter.summary}\n\n角色库（主要角色）：\n${charLib}\n\n前文剧情（保持连续，不要重复已发生的情节）：\n${recentContext}\n\n当前批次：第 ${targetPage.pageNumber} 批（属于"${targetChapter.title}"这一话）\n\n【2026-09-03 图下方文字三件套 · 必须严格输出】\n每格除了 description（出图用）+ dialogue（对白 ≤15 字）外，必须额外输出两个字段 —— 缺一个就读不懂这格漫画。\n- narration（20-80 字）=【作者】的声音，交代场景/时间/原因/走向；本批 6 格中至少 2-4 格要有；首格必须有；情绪转折时必须有。**严禁与 description 重复**（不要复述画面已经在做的事）。**严禁填"无"/"省略"等占位词**（要填就写一段真叙述；不要就空串）。\n- innerThought（0-50 字）=【主角】的内心独白；本批 6 格中至少 0-2 格要有；只在"主角选择/迷茫/觉醒/重要发现"的瞬间用，**用第一称**（如"我意识到…""我不明白…""这就是…"）。\n- narration 和 innerThought 都允许空串。空串表示"这格不需要额外的文字层"，前端不会显示空块。**严禁用占位词填充**。\n\n请把这一批拆成恰好 6 个分镜。${STORYBOARD_RULES}
+
+【角色写法 · 2026-10-20】description 里提到角色时，**只写名字和性别**（如"田经理（男）"），
+**严禁把角色 ID 写进 description**（ID 是给系统用的内部编号，读者看不懂，出图也会被当噪音）。
+角色的性别、年龄段、服装以角色库里的标注为准，**不要自己编** —— 代词也必须跟性别一致。\n\n核心要求：每个分镜的 dialogue 是"读者在画面上看到的文字"（1 句，≤15 字），description 是"镜头里正在发生的事"（画面本身）。两者必须互相解释、指向同一件事、同一个焦点 —— dialogue 必须能在 description 的画面里找到"它是谁说的/对着哪个物件说的/看着哪里说的"。禁止画面在演 A、旁白在讲 B。写 description 时先想清这一格的"一念"是什么（人物/情绪/动作），再让 dialogue 和道具共同强化它。`;
     const result = await callStructuredJson<z.infer<typeof PanelBreakdownZ>>(
       prompt,
       '你是一位漫画分镜师。请输出严格的 JSON 格式。',
@@ -124,6 +145,14 @@ router.post('/series/:id/pages/:pageId/breakdown', async (req, res) => {
     const validIds = new Set(series.characters.map(c => c.id));
     const panels = sanitizePanels(result.panels, validIds, `breakdown 第${targetPage.pageNumber}页`);
     if (!panels) return sendError(res, 502, '模型未返回有效分镜，请重试');
+    // 2026-10-20：清洗描述里混进来的角色 ID（prompt 已禁止，后处理兜底）。
+    // 读者看到「田经理（27ce402a）」会莫名其妙，出图时也纯属噪音。
+    let idStripped = 0;
+    for (const pn of panels) {
+      const cleaned = stripCharacterIds(pn.description);
+      if (cleaned !== pn.description) { pn.description = cleaned; idStripped++; }
+    }
+    if (idStripped > 0) console.log(`[pages] 拆解第 ${targetPage.pageNumber} 页：清洗掉 ${idStripped} 格描述里的角色 ID`);
     const allCharIds = new Set<string>();
     panels.forEach(p => p.characterIds.forEach(id => allCharIds.add(id)));
     // 重新设计分镜：旧分镜已作废，清理其已落盘图片（IO 失败不阻断）
@@ -148,6 +177,44 @@ router.post('/series/:id/pages/:pageId/breakdown', async (req, res) => {
     console.error(`[breakdown] 第${targetPage.pageNumber}页 失败:`, e?.message || e);
     if (e?.stack) console.error(e.stack.split('\n').slice(0, 6).join('\n'));
     sendFriendlyError(res, e, 'Page breakdown failed');
+  }
+});
+
+// 只清洗分镜描述里的角色 ID（2026-10-20）。
+//
+// 为什么需要单独一个端点，而不是走 PUT /panels：
+//   PUT 的 schema **不接受 imageUrl**（zod 会剥掉未知字段），
+//   它的设计意图是「用户改了分镜 → 旧图作废 → 下次重画」，
+//   所以它**必然**清空 imageUrl。
+//   而「只删描述里的 id」是纯文本清理，图完全不受影响 ——
+//   拿 PUT 来做会白白丢掉已经出好的图（实测踩过：174 格掉到 126）。
+//
+// 语义：**不动图、不改 status**（除非显式要求重画），只改描述文本。
+// body 可选传 { descriptions: { "<panelIndex>": "<新描述>" } } 做定点修正
+// （例如把写错性别的代词改回来）；没传就只做 id 清洗。
+router.post('/series/:id/pages/:pageId/clean-descriptions', (req, res) => {
+  const series = getSeries(req.params.id);
+  if (!series) return sendError(res, 404, 'Series not found');
+  const found = findPage(series, req.params.pageId);
+  if (!found) return sendError(res, 404, 'Page not found');
+  const page = found.page;
+  const fixes: Record<string, string> = (req.body?.descriptions ?? {});
+  const panels = page.panels.map(pn => {
+    const fixed = fixes[String(pn.index)];
+    if (typeof fixed === 'string' && fixed.trim()) {
+      return { ...pn, description: fixed.trim() };
+    }
+    const cleaned = stripCharacterIds(pn.description);
+    return cleaned === pn.description ? pn : { ...pn, description: cleaned };
+  });
+  const changed = panels.filter((p, i) => p.description !== page.panels[i].description).length;
+  if (changed > 0) {
+    // 直接改 panels 并落盘；status / errorMessage / imageUrl 全部原样保留
+    const updated = updatePage(series.id, found.chapter.id, page.id, { panels });
+    if (!updated) return sendError(res, 500, 'Failed to update page');
+    res.json({ page: updated, changed });
+  } else {
+    res.json({ page, changed: 0 });
   }
 });
 

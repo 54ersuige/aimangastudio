@@ -62,12 +62,48 @@ function atomicWrite(path: string, content: string): void {
   const tmp = `${path}.${randomUUID()}.tmp`;
   writeFileSync(tmp, content, 'utf-8');
   try {
-    if (existsSync(path)) copyFileSync(path, `${path}.bak`);
+    if (existsSync(path)) {
+      copyFileSync(path, `${path}.bak`);
+      // 2026-10-20：图数量变少时，额外留一份带时间戳的快照。
+      //
+      // 背景：实测出现过一次「磁盘上的图从 174 格变成 126 格」——
+      // 写盘内容来自某个进程的内存快照，而那个快照是残缺的。
+      // 常规的 .bak 只保留「上一代」，如果上一代也已经残缺就救不回来。
+      // 所以：**只要发现图在减少，就多留一份「写盘前」的完整快照**，
+      // 并打醒目告警 —— 下次再发生可以秒恢复，且问题会自己暴露出来。
+      try {
+        const before = readFileSync(path, 'utf-8');
+        const lost = countImages(before) - countImages(content);
+        if (lost > 0) {
+          const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const safety = `${path}.images-lost-${stamp}.json`;
+          copyFileSync(path, safety);
+          console.error(
+            `[series-store] ⚠️ 本次写盘会丢失 ${lost} 张分镜图` +
+            `（写盘前 ${countImages(before)} → 写盘后 ${countImages(content)}）。` +
+            `已另存完整快照：${safety}。请检查是否有进程用旧内存覆盖了数据。`,
+          );
+        }
+      } catch (e) {
+        // 完整性检查失败不能挡住主写入
+        console.error('[series-store] 写盘完整性检查失败（不影响本次写入）:', e);
+      }
+    }
   } catch (e) {
     // 备份失败不能挡住主写入，否则会从「丢数据」升级成「写不进去」
     console.error('[series-store] 备份 .bak 失败（不影响本次写入）:', e);
   }
   renameSync(tmp, path);
+}
+
+/** 数一个 series 数组 JSON 里的分镜图数量（只数有图的格）。 */
+function countImages(json: string): number {
+  let n = 0;
+  // 统计 "imageUrl":"..." 且值非空
+  for (const m of json.matchAll(/"imageUrl"\s*:\s*"([^"]*)"/g)) {
+    if (m[1]) n += 1;
+  }
+  return n;
 }
 
 /** 全系列连续页码（跨季/跨章不重复），与 Agent「跳到第 X 页」的全局语义对齐。 */
@@ -684,7 +720,9 @@ export function replacePanels(
     .map((p, i) => ({ ...p, index: i }));
   page.panels = normalized;
   // 只要用户改过 panel，重新生成时不能复用旧图：把状态退回到 draft。
-  page.status = 'draft';
+  // 2026-10-20：但**图其实还在**的情况（只改了描述、没删图）不该显示成"待出图" ——
+  // 所有格都还有图时保持 done，界面按 imageUrl 计数，显示才是准的。
+  page.status = page.panels.length > 0 && page.panels.every(p => !!p.imageUrl) ? 'done' : 'draft';
   page.errorMessage = undefined;
   updateSeries(seriesId, { arcs: series.arcs });
   return page;
