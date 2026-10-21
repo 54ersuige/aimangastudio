@@ -21,6 +21,8 @@ const PAD_X = 56;                // 左右纸边
 const IMG_W = STRIP_WIDTH - PAD_X * 2;
 
 const TEXT_FONT = '19px "Noto Serif SC", "Source Serif 4", Georgia, serif';
+/** 内心独白用斜体（与 HTML 导出的规范一致）。 */
+const ITALIC_FONT = 'italic 19px "Noto Serif SC", "Source Serif 4", Georgia, serif';
 const TEXT_LINE_HEIGHT = 33;
 const TEXT_X = PAD_X + 8;
 const TEXT_PAD_TOP = 12;
@@ -83,6 +85,10 @@ function drawDashedSeparator(ctx: CanvasRenderingContext2D, y: number): void {
 // ═══════════════════════════════════════════════════════════════════════
 
 const ACCENT = '#A6543C';        // 说话人名 / 金句 / 强调（砖红）
+/** 叙述（场景交代）的文字色 —— 比正文浅，读起来像"引言"而不是"台词"。 */
+const NARRATION_INK = '#8A8274';
+/** 内心独白的文字色（斜体）。 */
+const INNER_INK = '#6B6453';
 const QUOTE_FONT = 'bold 21px "Noto Serif SC", "Source Serif 4", Georgia, serif';
 const PREVIEW_LABEL_FONT = '13px "Noto Serif SC", Georgia, serif';
 
@@ -91,7 +97,15 @@ export interface EpisodeStripInput {
   chapterTitle: string;
   chapterIndex: number;
   /** 整话的全部格（跨页合并后按顺序） */
-  panels: Array<{ imageUrl: string; dialogue: string; speakerName?: string }>;
+  panels: Array<{
+    imageUrl: string;
+    dialogue: string;
+    speakerName?: string;
+    /** 叙述（场景/时间/背景交代）—— 读者要看的"世界交代"层。 */
+    narration?: string;
+    /** 内心独白（主角心里话）—— 读者要看的"心理"层。 */
+    innerThought?: string;
+  }>;
   tagline?: string;
   endingQuote?: string;
   nextPreview?: string;
@@ -101,7 +115,7 @@ export interface EpisodeStripInput {
   isLastEpisode?: boolean;
 }
 
-interface RichSegment { text: string; color: string }
+interface RichSegment { text: string; color: string; italic?: boolean }
 
 /** 从 dialogue 拆出说话人与正文。优先取"名字："前缀，否则用角色名兜底。 */
 export function splitSpeaker(dialogue: string, fallbackName?: string): { speaker?: string; body: string } {
@@ -115,13 +129,63 @@ export function splitSpeaker(dialogue: string, fallbackName?: string): { speaker
   return fallbackName ? { speaker: fallbackName, body } : { body };
 }
 
-/** 把富文本片段按宽度贪婪换行。返回行（每行是若干着色片段）。 */
-function wrapRich(ctx: CanvasRenderingContext2D, segments: RichSegment[], maxWidth: number): RichSegment[][] {
+/** 一格要显示的文字（三件套）的来源。 */
+export interface PanelTextSource {
+  dialogue: string;
+  speakerName?: string;
+  narration?: string;
+  innerThought?: string;
+}
+
+/**
+ * 组装一格的图下文字（三件套）。
+ *
+ * 2026-10-20：**之前这里只有对白**，旁白（场景交代）和内心独白被整个漏掉 ——
+ * 读者在公众号里看到的就只剩"图 + 台词"，时间/地点/前情全没了。
+ *
+ * 顺序按阅读节奏（与 wechatHtmlExport 的规范一致）：
+ *   先看图 → 看世界交代（narration）→ 看主角心声（innerThought）→ 听人说话（dialogue）
+ * 竖屏手机阅读时这个顺序最舒服（叙事由远及近）。
+ *
+ * **不渲染 description** —— 那是 AI 生图指令（"远景里，玻璃闸机把空间切成内外两层…"），
+ * 不属于漫画正文，给读者看反而干扰。
+ */
+export function buildPanelTextSegments(p: PanelTextSource): RichSegment[] {
+  const { speaker, body } = splitSpeaker(p.dialogue || '', p.speakerName);
+  const segments: RichSegment[] = [];
+  if (p.narration?.trim()) {
+    segments.push({ text: '—— ', color: NARRATION_INK });
+    segments.push({ text: p.narration.trim(), color: NARRATION_INK });
+    segments.push({ text: '\n', color: NARRATION_INK });
+  }
+  if (p.innerThought?.trim()) {
+    segments.push({ text: '💭 ', color: INNER_INK, italic: true });
+    segments.push({ text: p.innerThought.trim(), color: INNER_INK, italic: true });
+    segments.push({ text: '\n', color: INNER_INK, italic: true });
+  }
+  if (speaker) segments.push({ text: `${speaker}：`, color: ACCENT });
+  segments.push({ text: body, color: INK_2 });
+  return segments;
+}
+
+/** 把富文本片段按宽度贪婪换行。返回行（每行是若干着色片段）。
+ *  片段之间用 '\n' 强制分段（旁白 / 内心 / 对白 三层之间要断行）。
+ *  italic 片段单独用斜体字体测量与绘制。
+ *  2026-10-20 导出：让测试能直接锁住「三层之间的换行」和「斜体切换」这两件事。 */
+export function wrapRich(ctx: CanvasRenderingContext2D, segments: RichSegment[], maxWidth: number): RichSegment[][] {
   const lines: RichSegment[][] = [];
   let line: RichSegment[] = [];
   let lineW = 0;
+  const baseFont = ctx.font;
   for (const seg of segments) {
+    ctx.font = seg.italic ? ITALIC_FONT : baseFont;
     for (const ch of [...seg.text]) {
+      if (ch === '\n') {
+        if (line.length > 0) lines.push(line);
+        line = [];
+        lineW = 0;
+        continue;
+      }
       const w = ctx.measureText(ch).width;
       if (lineW + w > maxWidth && line.length > 0) {
         lines.push(line);
@@ -129,22 +193,26 @@ function wrapRich(ctx: CanvasRenderingContext2D, segments: RichSegment[], maxWid
         lineW = 0;
       }
       const last = line[line.length - 1];
-      if (last && last.color === seg.color) last.text += ch;
-      else line.push({ text: ch, color: seg.color });
+      if (last && last.color === seg.color && !!last.italic === !!seg.italic) last.text += ch;
+      else line.push({ text: ch, color: seg.color, italic: seg.italic });
       lineW += w;
     }
   }
   if (line.length > 0) lines.push(line);
+  ctx.font = baseFont;
   return lines;
 }
 
 function drawRichLine(ctx: CanvasRenderingContext2D, line: RichSegment[], x: number, y: number): void {
   let cx = x;
+  const baseFont = ctx.font;
   for (const seg of line) {
+    ctx.font = seg.italic ? ITALIC_FONT : baseFont;
     ctx.fillStyle = seg.color;
     ctx.fillText(seg.text, cx, y);
     cx += ctx.measureText(seg.text).width;
   }
+  ctx.font = baseFont;
 }
 
 /** 画一话的完整长图并触发下载。 */
@@ -165,11 +233,10 @@ export async function exportEpisodeAsStrip(input: EpisodeStripInput): Promise<vo
     ? wrapText(ctx, input.tagline.trim(), IMG_W)
     : [];
   const richPanels = panels.map((p, i) => {
-    const { speaker, body } = splitSpeaker(p.dialogue, p.speakerName);
-    const segments: RichSegment[] = [];
-    if (speaker) segments.push({ text: `${speaker}：`, color: ACCENT });
-    segments.push({ text: body, color: INK_2 });
-    const lines = body ? wrapRich(ctx, segments, IMG_W - (TEXT_X - PAD_X) * 2) : [];
+    const segments = buildPanelTextSegments(p);
+    const lines = segments.length > 0
+      ? wrapRich(ctx, segments, IMG_W - (TEXT_X - PAD_X) * 2)
+      : [];
     const imgH = Math.round(IMG_W * imgs[i].height / imgs[i].width);
     const textH = lines.length > 0 ? TEXT_PAD_TOP + lines.length * TEXT_LINE_HEIGHT + TEXT_PAD_BOTTOM : 0;
     return { lines, imgH, textH, hasText: lines.length > 0 };
@@ -351,6 +418,9 @@ export async function exportSeriesAsEpisodeStrips(series: Series): Promise<numbe
         imageUrl: pn.imageUrl!,
         dialogue: pn.dialogue || '',
         speakerName: pn.characterIds?.map(nameOf).find(Boolean),
+        // 2026-10-20：整季导出同样要带齐三件套，否则公众号里读不到旁白/内心独白。
+        narration: pn.narration || '',
+        innerThought: pn.innerThought || '',
       })),
     });
     count++;

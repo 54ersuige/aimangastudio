@@ -106,6 +106,10 @@ function EpisodePreview({
           imageUrl: pn.imageUrl!,
           dialogue: pn.dialogue || '',
           speakerName: pn.characterIds?.map(nameOf).find(Boolean),
+          // 2026-10-20：导出也要带上旁白/内心独白 —— 之前只传对白，
+          // 导致公众号长图里"场景交代"和"主角心声"整层丢失。
+          narration: pn.narration || '',
+          innerThought: pn.innerThought || '',
         })),
       });
       toast.push('长图已导出，请到浏览器下载目录查看', 'success');
@@ -189,6 +193,27 @@ function EpisodePreview({
                 ) : (
                   <div style={{ width: '100%', aspectRatio: '3 / 4', border: `1px dashed ${RULE}`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: INK_2, fontSize: '0.75rem', background: PAPER }}>
                     待生成
+                  </div>
+                )}
+                {pn.narration && (
+                  <div style={{
+                    marginTop: '0.625rem', padding: '0.5rem 0.875rem',
+                    background: '#FAF7EE', borderLeft: '3px solid #B59A6F',
+                    color: '#4B4636', fontSize: '0.8125rem', lineHeight: 1.75,
+                    textAlign: 'justify', borderRadius: '2px',
+                    fontFamily: 'Georgia, "Noto Serif SC", serif',
+                  }}>
+                    {pn.narration}
+                  </div>
+                )}
+                {pn.innerThought && (
+                  <div style={{
+                    marginTop: '0.5rem', padding: '0.375rem 0.875rem', paddingLeft: '1.5rem',
+                    color: '#6B6453', fontStyle: 'italic', fontSize: '0.8125rem',
+                    lineHeight: 1.75, textAlign: 'justify',
+                    fontFamily: 'Georgia, "Noto Serif SC", serif',
+                  }}>
+                    💭 {pn.innerThought}
                   </div>
                 )}
                 {body && (
