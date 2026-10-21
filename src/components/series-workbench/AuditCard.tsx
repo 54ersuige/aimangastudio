@@ -47,11 +47,12 @@ export interface AuditRecord {
     confidence: number;
   } | null;
   /**
-   * 画面内可读文字检查（2026-10-20 新增第五道闸）。
-   * hasReadableText=true = 画面里出现了可读文字或伪汉字乱码（失败品）。
+   * 画面内文字检查（2026-10-20 新增第五道闸）。
+   * hasGarbledText=true = 伪字乱码（失败品）· hasRealText=true = 真实文字（不拦）
    */
   textInImage?: {
-    hasReadableText: boolean;
+    hasGarbledText: boolean;
+    hasRealText: boolean;
     reason: string;
     confidence: number;
   } | null;
@@ -333,9 +334,14 @@ export function AuditCard({ seriesId }: Props) {
                           🎯 图文对齐：{r.alignmentAudit.reason}
                         </div>
                       )}
-                      {r.textInImage?.hasReadableText && (
+                      {r.textInImage?.hasGarbledText && (
                         <div style={{ color: '#d97706', fontSize: '0.75rem' }}>
-                          🔤 画面内有文字：{r.textInImage.reason}
+                          🔤 画面内伪字乱码：{r.textInImage.reason}
+                        </div>
+                      )}
+                      {r.textInImage?.hasRealText && !r.textInImage.hasGarbledText && (
+                        <div style={{ color: 'var(--ink-3)', fontSize: '0.75rem' }}>
+                          🔤 画面内有真实文字（不处理）：{r.textInImage.reason}
                         </div>
                       )}
                     </>

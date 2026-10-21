@@ -103,10 +103,19 @@ export interface PanelGateResult {
   cached: boolean;
 }
 
-/** 画面内可读文字检查结果。 */
+/** 画面内文字检查结果。 */
 export interface TextInImageAudit {
-  /** true = 画面里出现了可读文字或伪汉字（失败品）。 */
-  hasReadableText: boolean;
+  /**
+   * 出现了**伪字乱码**（失败品，必须重画）。
+   * 例：跛剃流搬己治云、Ar K-56a6l Mvrofr —— 模仿文字形状但拼不出任何词。
+   */
+  hasGarbledText: boolean;
+  /**
+   * 出现了**真实可读的文字**（**不拦**）。
+   * 例：电梯屏上的楼层号「12」、招牌上的店名、文件标题。
+   * 这类字可能完全合理、甚至是剧情需要的，不值得为它重画一次。
+   */
+  hasRealText: boolean;
   reason: string;
   confidence: number;
 }
@@ -240,26 +249,33 @@ export function buildSystemInstruction(): string {
     'reason is one short clause (max 20 chars), only when present=false.',
     'Omit this block entirely if no checklist was supplied.',
     '',
-    '=== CHECK 5: READABLE TEXT IN IMAGE ===',
+    '=== CHECK 5: GARBLED / FAKE TEXT IN IMAGE ===',
     'This magazine never prints readable text inside a panel. Screens, signage,',
-    'posters, books, documents, product labels, clothing prints, licence plates —',
-    'all must be blank, blurred, or reduced to abstract marks.',
+    'posters, books, documents, product labels — all must be blank, blurred,',
+    'or reduced to abstract marks.',
     '',
-    'Report whether the image contains ANY readable characters:',
-    '  - real Chinese/Japanese/Latin words or sentences → hasReadableText = true',
-    '  - GIBBERISH that imitates characters (fake strokes that look like',
-    '    "跛剃流搬" or scrambled pseudo-Chinese) → hasReadableText = true',
-    '    (this is a FAILURE, even though no real word is present)',
-    '  - abstract strokes, scribbles, blurred smudges, non-character shapes → false',
-    '  - a signature-like flourish with no legible characters → false',
+    'Distinguish TWO kinds of writing and report them separately:',
     '',
-    'IMPORTANT — do NOT report as text:',
-    '  - panel borders, speech-bubble outlines without content, speed lines;',
-    '  - patterns, hatching, or decorative marks that do not form characters;',
-    '  - text that is too small/blurred to read as characters.',
-    'When in doubt, report false. Only flag characters that are actually legible',
-    'or clearly imitate characters.',
-    'Output "textInImage": { "hasReadableText": bool, "reason": str, "confidence": 0..1 }',
+    '  hasGarbledText = TRUE  ← FAILURE, worth redrawing:',
+    '    fake characters that imitate writing but spell nothing — scrambled',
+    '    pseudo-Chinese ("跛剃流搬己治云"), pseudo-Latin gibberish',
+    '    ("Ar K-56a6l Mvrofr"), random stroke clusters shaped like characters.',
+    '    A reader sees these as BROKEN WRITING. That is a failed panel.',
+    '',
+    '  hasRealText = TRUE  ← NOT a failure by itself:',
+    '    actual readable words or numbers a reader can make sense of —',
+    '    a floor number on an elevator display ("12"), a shop sign,',
+    '    a title on a document. These may even be intentional in the story.',
+    '    Do NOT set hasGarbledText for these.',
+    '',
+    'Both can be true at once (some real words plus some fake ones).',
+    '',
+    'IMPORTANT — do NOT report as writing at all: panel borders, speech-bubble',
+    'outlines without content, speed lines, patterns, hatching, decorative marks,',
+    'signatures that form no characters, and text too small/blurred to read.',
+    'When in doubt about garbled text, report false — only flag characters that',
+    'actually imitate broken writing.',
+    'Output "textInImage": { "hasGarbledText": bool, "hasRealText": bool, "reason": str, "confidence": 0..1 }',
     '',
     '=== CHECK 4: EDITORIAL SCORING (8 dimensions) ===',    'Each dimension is 0..10 (10 = meets professional publication standard):',
     '  8 = publishable with light touch-ups; 6 = solid amateur work;',
@@ -274,7 +290,7 @@ export function buildSystemInstruction(): string {
     '  "limb":  { "abnormal": boolean, "reason": string, "confidence": number, "regions": [...] },',
     '  "gender": { "observed": [string], "confidence": number },',
     '  "alignment": { "results": [ { "text": string, "present": boolean, "reason": string, "severity": "critical"|"minor" } ] },',
-    '  "textInImage": { "hasReadableText": boolean, "reason": string, "confidence": number },',
+    '  "textInImage": { "hasGarbledText": boolean, "hasRealText": boolean, "reason": string, "confidence": number },',
     '  "dimensions": {',
     '    "D1_character_consistency": { "score": number, "reason": string },',
     '    "D2_cinematography":        { "score": number, "reason": string },',
@@ -444,9 +460,13 @@ export function evaluateAlignmentResults(
 
 function parseTextInImage(p: any): TextInImageAudit | null {
   const t = p?.textInImage;
-  if (!t || typeof t.hasReadableText !== 'boolean') return null;
+  if (!t || typeof t.hasGarbledText !== 'boolean') return null;
   return {
-    hasReadableText: t.hasReadableText === true,
+    hasGarbledText: t.hasGarbledText === true,
+    // 老字段名兼容（第一版叫 hasReadableText）
+    hasRealText: typeof t.hasRealText === 'boolean'
+      ? t.hasRealText === true
+      : t.hasReadableText === true,
     reason: String(t.reason || '').trim(),
     confidence: typeof t.confidence === 'number' ? clamp01(t.confidence) : 0.5,
   };
@@ -670,11 +690,16 @@ export function judgePanel(
     reasons.push(`alignment: ${gate.alignment.reason}`);
   }
 
-  // 2026-10-20：画面内出现可读文字（含伪汉字）→ 不通过，重画。
-  // 这是**大问题**：漫画里出现乱码是最扎眼的硬伤，而此前根本没人查。
-  const textOk = !gate.textInImage || !gate.textInImage.hasReadableText;
+  // 2026-10-20：画面内出现**伪字乱码** → 不通过，重画。
+  // 这是**大问题**：漫画里出现假字是最扎眼的硬伤，而此前根本没人查。
+  //
+  // 但**真实可读的文字不拦**（2026-10-20 用户定的原则）：
+  // 「文字合适或者影响不大、关注度不高不用处理，要保证效果的前提下成本合理」。
+  // 电梯屏上的楼层号「12」、招牌店名、文件标题 —— 这些真字可能是合理的，
+  // 为它重画一次是纯浪费。
+  const textOk = !gate.textInImage || !gate.textInImage.hasGarbledText;
   if (!textOk && gate.textInImage) {
-    reasons.push(`text: ${gate.textInImage.reason || '画面内出现可读文字'}`);
+    reasons.push(`text: ${gate.textInImage.reason || '画面内出现伪字乱码'}`);
   }
 
   return { ok: reasons.length === 0, reasons };
@@ -728,9 +753,12 @@ export interface GateAuditFields {
     reason: string;
     confidence: number;
   } | null;
-  /** 画面内可读文字检查（2026-10-20 新增第五道闸）。 */
+  /** 画面内文字检查（2026-10-20 新增第五道闸）。 */
   textInImage: {
-    hasReadableText: boolean;
+    /** 伪字乱码 → 拦（重画）。 */
+    hasGarbledText: boolean;
+    /** 真实可读文字 → 只记录，不拦。 */
+    hasRealText: boolean;
     reason: string;
     confidence: number;
   } | null;
@@ -794,7 +822,8 @@ export function gateToAuditFields(
       : null,
     textInImage: gate.textInImage
       ? {
-        hasReadableText: gate.textInImage.hasReadableText,
+        hasGarbledText: gate.textInImage.hasGarbledText,
+        hasRealText: gate.textInImage.hasRealText,
         reason: gate.textInImage.reason,
         confidence: gate.textInImage.confidence,
       }

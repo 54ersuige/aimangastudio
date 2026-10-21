@@ -72,11 +72,13 @@ export interface PanelAuditRecord {
     confidence: number;
   } | null;
   /**
-   * 画面内可读文字检查（2026-10-20 新增第五道闸）。
-   * hasReadableText=true = 画面里出现了可读文字或伪汉字乱码（失败品）。
+   * 画面内文字检查（2026-10-20 新增第五道闸）。
+   * hasGarbledText=true = 出现伪字乱码（失败品，会触发重画）。
+   * hasRealText=true = 出现真实可读文字（**不拦**，可能合理、可能剧情需要）。
    */
   textInImage?: {
-    hasReadableText: boolean;
+    hasGarbledText: boolean;
+    hasRealText: boolean;
     reason: string;
     confidence: number;
   } | null;
