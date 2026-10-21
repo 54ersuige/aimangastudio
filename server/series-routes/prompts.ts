@@ -9,7 +9,7 @@ import { getImageProvider, iterAllChapters, callStructuredJson } from './helpers
 import { z } from 'zod';
 import { guardedImage } from '../limb-guard.js';
 import { repairLimbRegions } from '../limb-guard.js';
-import { runPanelGate, judgePanel, needsLimbRepair, gateToAuditFields, ALL_DIMENSIONS, type PanelGateResult } from '../panel-gate.js';
+import { runPanelGate, judgePanel, needsLimbRepair, gateToAuditFields, ALL_DIMENSIONS, type PanelGateResult, type TextInImageAudit } from '../panel-gate.js';
 import type { DimensionKey, PanelReview } from '../audit/comic-reviewer.js';
 import { validatePage, validateCharacter } from '../series-store/validate.js';
 import { appendPanelAudit, hashImageDataUrl, type PanelAuditRecord } from '../audit/panel-audit.js';
@@ -1319,6 +1319,10 @@ async function generateOnePanelImage(args: GenerateOnePanelArgs): Promise<string
   // 各 attempt 出图后逐项核对 —— 把"description 没画出来"变成可修正的重画信号。
   let alignmentItems: string[] | null = null;
   let alignmentResult: AlignmentAudit | null = null;
+  // 2026-10-20：第五道闸（画面内文字）的结果。
+  // 必须单独记一份 —— 漏了这一行，闸门虽然**在跑**（判据生效），
+  // 但结果不会进审计记录，UI 上那个提示就永远不显示。
+  let textInImageResult: TextInImageAudit | null = null;
   try {
     const extracted = await extractAlignmentItems(panel.description, sceneDescription);
     if (extracted && extracted.items.length > 0) alignmentItems = extracted.items;
@@ -1439,6 +1443,7 @@ async function generateOnePanelImage(args: GenerateOnePanelArgs): Promise<string
       genderResult = auditFields.genderAudit;
       reviewResult = auditFields.review;
       alignmentResult = gate.alignment;
+    textInImageResult = gate.textInImage;
       if (gate.review) previousReview = gate.review;
 
       const verdict = judgePanel(gate, { alignmentItems });
@@ -1517,6 +1522,15 @@ async function generateOnePanelImage(args: GenerateOnePanelArgs): Promise<string
         criticalMissing: alignmentResult.criticalMissing,
         reason: alignmentResult.reason,
         confidence: alignmentResult.confidence,
+      }
+      : null,
+    // 2026-10-20：第五道闸的结果进审计（漏了它，UI 上就看不到这个提示）
+    textInImage: textInImageResult
+      ? {
+        hasGarbledText: textInImageResult.hasGarbledText,
+        hasRealText: textInImageResult.hasRealText,
+        reason: textInImageResult.reason,
+        confidence: textInImageResult.confidence,
       }
       : null,
     attempt: finalImage === null ? 0 : finalAttempt,
